@@ -11,7 +11,7 @@ RUN npm install
 
 COPY VERSION /app/VERSION
 COPY web ./
-RUN NEXT_PUBLIC_APP_VERSION="$(cat /app/VERSION)" npm run build
+RUN npx tsc --noEmit && NEXT_PUBLIC_APP_VERSION="$(cat /app/VERSION)" npm run build
 
 
 FROM --platform=$BUILDPLATFORM node:22-bookworm-slim AS codex-register-build
@@ -40,6 +40,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN pip install --no-cache-dir uv
+
+# Native editable documents and real rendered slide previews. No model code runs.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libreoffice-impress fonts-noto-cjk poppler-utils \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project

@@ -56,7 +56,8 @@ function check(name, ok, detail) {
           body = { optimized_prompt: '已经优化的提示词' };
         } else if (p === '/api/settings') {
           body = { config: JSON.parse(fs.readFileSync(path.join(__dirname, '../../config.example.json'), 'utf8')) };
-        } else if (p === '/api/cpa/pools') body = { pools: [] };
+        } else if (p === '/api/editable-studio/stats') body = { daily_tokens: 0, jobs: [], recent: [] };
+        else if (p === '/api/cpa/pools') body = { pools: [] };
         else if (p === '/api/sub2api/servers') body = { servers: [] };
         else if (p.includes('jobs')) body = { items: [], status: 'error', job_id: 'mock-only', error: 'Test prevents real generation' };
         return route.fulfill({ json: body, headers: { 'access-control-allow-origin': '*' } });

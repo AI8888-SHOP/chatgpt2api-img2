@@ -6,6 +6,7 @@ from pathlib import Path
 import time
 from typing import Any
 from services.prompt_optimizer_config import PromptOptimizerSettings, merge_optimizer_settings
+from services.editable_studio_config import StudioSettings, merge_studio_settings
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = BASE_DIR / "data"
@@ -435,6 +436,7 @@ class ConfigStore:
         data["sensitive_words"] = self.sensitive_words
         data["ai_review"] = self.ai_review
         data["prompt_optimizer"] = self.get_prompt_optimizer_settings().public_dict()
+        data["editable_studio"] = self.get_studio_settings().public_dict()
         data["global_system_prompt"] = self.global_system_prompt
         data["image_storage"] = self.get_image_storage_settings()
         data["chat_completion_cache"] = self.get_chat_completion_cache_settings()
@@ -517,6 +519,14 @@ class ConfigStore:
         previous_data = self.data
         next_data = dict(data or {})
         previous_optimizer = self.data.get("prompt_optimizer") or {}
+        previous_studio = self.data.get("editable_studio") or {}
+        if "editable_studio" in next_data:
+            try:
+                next_data["editable_studio"] = merge_studio_settings(next_data["editable_studio"], previous_studio)
+            except (ValueError, TypeError):
+                raise ValueError("文档工作室配置无效，请检查连接、预算和限额") from None
+        elif previous_studio:
+            next_data["editable_studio"] = previous_studio
         if "prompt_optimizer" in next_data:
             try:
                 next_data["prompt_optimizer"] = merge_optimizer_settings(next_data["prompt_optimizer"], previous_optimizer)
@@ -547,6 +557,9 @@ class ConfigStore:
 
     def get_prompt_optimizer_settings(self) -> PromptOptimizerSettings:
         return PromptOptimizerSettings.model_validate(self.data.get("prompt_optimizer") or {})
+
+    def get_studio_settings(self) -> StudioSettings:
+        return StudioSettings.model_validate(self.data.get("editable_studio") or {})
 
 
 config = ConfigStore(CONFIG_FILE)

@@ -88,6 +88,15 @@
     "min_quota": 1,
     "min_account_age_seconds": 600
   },
+  "editable_studio": {
+    "enabled": false,
+    "reuse_optimizer_connection": true,
+    "base_url": "",
+    "api_key": "",
+    "model": "",
+    "protocol": "responses",
+    "reasoning_effort": "medium"
+  },
   "global_system_prompt": "",
   "image_storage": {
     "enabled": false,

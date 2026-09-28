@@ -12,7 +12,29 @@ env:
   IMAGE_NAME: chatgpt2api
 
 jobs:
+  checks:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install native document runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libreoffice-impress fonts-noto-cjk poppler-utils
+          python -m pip install uv
+          uv sync --frozen
+      - name: Verify backend, quotas and native artifacts
+        env:
+          CHATGPT2API_AUTH_KEY: ci-synthetic-test-key
+          PYTHONWARNINGS: ignore::ResourceWarning
+        run: uv run python -m unittest discover -s tests -v
+
   docker:
+    needs: checks
     runs-on: ubuntu-latest
     permissions:
       contents: read

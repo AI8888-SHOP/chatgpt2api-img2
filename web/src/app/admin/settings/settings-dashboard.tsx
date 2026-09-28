@@ -7,6 +7,7 @@ import { CPAPoolDialog } from "@/app/settings/components/cpa-pool-dialog";
 import { CPAPoolsCard } from "@/app/settings/components/cpa-pools-card";
 import { ImageUpstreamsCard } from "@/app/settings/components/image-upstreams-card";
 import { PromptOptimizerCard } from "@/app/settings/components/prompt-optimizer-card";
+import { EditableStudioCard } from "@/app/settings/components/editable-studio-card";
 import { ImportBrowserDialog } from "@/app/settings/components/import-browser-dialog";
 import { ProxySettingsCard } from "@/app/settings/components/proxy-settings-card";
 import { QuickPromptsCard } from "@/app/settings/components/quick-prompts-card";
@@ -62,6 +63,7 @@ export default function SettingsPage() {
         <AccountPoolPolicyCard />
         <QuickPromptsCard />
         <PromptOptimizerCard />
+        <EditableStudioCard />
         <ImageUpstreamsCard />
         <CPAPoolsCard />
         <Sub2APIConnections />

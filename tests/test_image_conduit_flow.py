@@ -142,18 +142,16 @@ class ImageConduitFlowTests(unittest.TestCase):
         self.assertTrue(chatgpt_service_module._is_tls_connection_error(message))
         self.assertTrue(conversation.is_tls_connection_error(message))
 
-    def test_grok_model_is_rejected_for_image_edits(self) -> None:
+    def test_grok_model_edits_use_configured_upstream_not_account_pool(self) -> None:
         service = chatgpt_service_module.ChatGPTService()
-        with patch.object(service, "_ensure_free_account_pool") as ensure_pool:
-            with self.assertRaises(image_service.ImageGenerationError) as raised:
-                service.edit_with_pool(
-                    "make it brighter",
-                    [(PNG_BYTES, "input.png", "image/png")],
-                    "grok-imagine-image",
-                    1,
-                )
-
-        self.assertIn("only supports text-to-image", str(raised.exception))
+        expected = {"created": 1, "data": [{"url": "/generated-images/edit.png"}]}
+        with (
+            patch.object(chatgpt_service_module, "edit_image_upstream", return_value=expected) as edit_upstream,
+            patch.object(service, "_ensure_free_account_pool") as ensure_pool,
+        ):
+            result = service.edit_with_pool("make it brighter", [(PNG_BYTES, "input.png", "image/png")], "grok-imagine-image", 1)
+        self.assertEqual(result, expected)
+        edit_upstream.assert_called_once_with("make it brighter", [(PNG_BYTES, "input.png", "image/png")], n=1, metadata=None, model="grok-imagine-image")
         ensure_pool.assert_not_called()
 
     def test_grok_model_remains_enabled_for_text_to_image(self) -> None:

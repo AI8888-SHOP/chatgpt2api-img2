@@ -268,6 +268,22 @@ class EditableFileTaskService:
             raise FileNotFoundError(raw)
         return path
 
+    def owns_file(self, owner_id: str, path: Path) -> bool:
+        from urllib.parse import urlsplit, unquote
+        with self._lock:
+            for task in self._tasks.values():
+                if task.get("owner_id") != owner_id:
+                    continue
+                for value in (task.get("result") or {}).values():
+                    if not isinstance(value,str):
+                        continue
+                    relative = unquote(urlsplit(value).path)
+                    if relative.startswith("/files/"):
+                        candidate = (EDITABLE_FILE_ROOT / relative[len("/files/"):]).resolve()
+                        if candidate == path.resolve():
+                            return True
+        return False
+
     def _update_task(self, key: str, **updates: Any) -> None:
         with self._lock:
             task = self._tasks.get(key)

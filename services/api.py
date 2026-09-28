@@ -32,6 +32,8 @@ from services.prompt_optimizer_service import (
 from services.content_filter import check_request
 from services.cpa_service import cpa_config, cpa_import_service, list_remote_files
 from services.editable_file_task_service import editable_file_task_service
+from services.editable_studio_service import StudioService
+from services.editable_studio_models import PlanRequest, GenerateRequest
 from services.proxy_service import test_proxy
 from services.protocol import openai_v1_chat_complete, openai_v1_models, openai_v1_response
 from services.register_service import (
@@ -847,6 +849,7 @@ def resolve_web_asset(requested_path: str) -> Path | None:
 def create_app() -> FastAPI:
     chatgpt_service = ChatGPTService()
     app_version = get_app_version()
+    studio = StudioService(config, user_service, DATA_DIR / "editable_studio")
     init_default_admin_key()
     recovered_image_jobs = _recover_unfinished_image_jobs()
     if recovered_image_jobs:
@@ -861,10 +864,12 @@ def create_app() -> FastAPI:
         thread = start_limited_account_watcher(stop_event)
         reservation_thread = start_quota_reservation_watcher(stop_event)
         auto_register_thread = start_auto_register_watcher(stop_event)
+        studio.start()
         try:
             yield
         finally:
             stop_event.set()
+            studio.stop()
             thread.join(timeout=1)
             reservation_thread.join(timeout=1)
             auto_register_thread.join(timeout=1)
@@ -883,6 +888,72 @@ def create_app() -> FastAPI:
     app.mount("/images", StaticFiles(directory=config.images_dir), name="images")
     router = APIRouter()
     prompt_optimizer = PromptOptimizerService(OptimizerLimits(DATA_DIR / "prompt_optimizer_limits.db"))
+
+    def studio_user(authorization):
+        token = extract_bearer_token(authorization)
+        if not token.startswith("usr_"):
+            raise HTTPException(403, detail={"error":"文档工作室仅支持网页登录，不支持 API Key 调用"})
+        return require_user(authorization)[1]
+
+    studio_uploads = set()
+
+    async def studio_body(request, model, maximum, owner):
+        maximum_uploads = min(8, max(2, config.get_studio_settings().global_concurrency * 2))
+        if owner in studio_uploads or len(studio_uploads) >= maximum_uploads:
+            raise HTTPException(429, detail={"error":"上传繁忙，请稍后重试"}, headers={"Retry-After":"30"})
+        studio_uploads.add(owner)
+        raw = bytearray()
+        try:
+            async with asyncio.timeout(30):
+                async for chunk in request.stream():
+                    if len(raw)+len(chunk)>maximum:
+                        raise HTTPException(413,detail={"error":"上传内容过大"})
+                    raw.extend(chunk)
+        except TimeoutError:
+            raise HTTPException(408,detail={"error":"上传超时"}) from None
+        finally:
+            studio_uploads.discard(owner)
+        try:
+            return model.model_validate_json(bytes(raw))
+        except ValueError:
+            raise HTTPException(422,detail={"error":"制作参数无效或内容超限，请检查输入；不允许自定义模型或工具"}) from None
+
+    @router.get("/v1/editable-studio/config")
+    async def studio_config(authorization: str | None = Header(default=None)):
+        studio_user(authorization)
+        return studio.public_config()
+
+    @router.post("/v1/editable-studio/plans")
+    async def studio_plan(request: Request, authorization: str | None = Header(default=None)):
+        user = studio_user(authorization)
+        s = studio.settings()
+        body = await studio_body(request,PlanRequest,min(128*1024*1024,s.max_reference_images*s.max_image_mb*1024*1024*4//3+65536),user.id)
+        await run_in_threadpool(check_request,body.prompt)
+        return await run_in_threadpool(studio.plan,user,body)
+
+    @router.post("/v1/editable-studio/jobs")
+    async def studio_submit(request: Request, authorization: str | None = Header(default=None)):
+        user = studio_user(authorization)
+        body = await studio_body(request,GenerateRequest,256*1024,user.id)
+        await run_in_threadpool(check_request,body.plan.model_dump_json())
+        return await run_in_threadpool(studio.submit,user,body)
+
+    @router.get("/v1/editable-studio/jobs")
+    async def studio_history(authorization: str | None = Header(default=None)):
+        user = studio_user(authorization)
+        rows = await run_in_threadpool(studio.store.list_jobs,user.id)
+        return {"items":[studio.public_job(row) for row in rows]}
+
+    @router.get("/v1/editable-studio/jobs/{job_id}/files/{filename}")
+    async def studio_download(job_id: str, filename: str, authorization: str | None = Header(default=None)):
+        user = studio_user(authorization)
+        path = await run_in_threadpool(studio.file_path,user.id,job_id,filename)
+        return FileResponse(path,filename=path.name,headers={"Cache-Control":"private, no-store","X-Content-Type-Options":"nosniff"})
+
+    @router.get("/api/editable-studio/stats")
+    async def studio_stats(authorization: str | None = Header(default=None)):
+        require_auth_key(authorization)
+        return await run_in_threadpool(studio.store.stats)
 
     @router.get("/v1/models")
     async def list_models(authorization: str | None = Header(default=None)):
@@ -1928,12 +1999,15 @@ def create_app() -> FastAPI:
         return await run_in_threadpool(editable_file_task_service.list_tasks, identity, task_ids)
 
     @router.get("/files/{file_path:path}")
-    async def download_editable_file(file_path: str):
+    async def download_editable_file(file_path: str, authorization: str | None = Header(default=None)):
+        _, user = require_user(authorization)
         try:
             path = await run_in_threadpool(editable_file_task_service.public_file_path, file_path)
+            if not editable_file_task_service.owns_file(user.id,path):
+                raise FileNotFoundError()
         except Exception as exc:
             raise HTTPException(status_code=404, detail={"error": "file not found"}) from exc
-        return FileResponse(path, filename=path.name)
+        return FileResponse(path, filename=path.name, headers={"Cache-Control":"private, no-store","X-Content-Type-Options":"nosniff"})
 
     @router.post("/v1/ppt/generations")
     async def create_ppt_task(
@@ -1942,7 +2016,9 @@ def create_app() -> FastAPI:
         authorization: str | None = Header(default=None),
     ):
         _, api_key = require_user(authorization)
-        raise HTTPException(status_code=403, detail={"error": "PPT 模块开发中"})
+        if config.get_studio_settings().enabled:
+            raise HTTPException(409, detail={"error": "PPT 已启用 API 工作室，请先整理并确认演示方案"})
+        raise HTTPException(503, detail={"error": "PPT 文档工作室尚未启用，请联系管理员"})
 
     @router.post("/v1/psd/generations")
     async def create_psd_task(
@@ -1951,6 +2027,8 @@ def create_app() -> FastAPI:
         authorization: str | None = Header(default=None),
     ):
         _, api_key = require_user(authorization)
+        if config.get_studio_settings().enabled:
+            raise HTTPException(409,detail={"error":"PSD 已启用 API 工作室，请先整理并确认图层方案"})
         prompt = str(body.prompt or "").strip()
         base64_images = [str(item or "").strip() for item in (body.base64_images or []) if str(item or "").strip()]
         image_count = len(base64_images)

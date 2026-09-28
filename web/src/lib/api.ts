@@ -49,6 +49,7 @@ type AccountUpdateResponse = {
 };
 
 export type SettingsConfig = {
+  editable_studio?: import("@/lib/editable-studio").StudioAdminConfig;
   prompt_optimizer?: PromptOptimizerConfig;
   site_title?: string;
   proxy: string;
