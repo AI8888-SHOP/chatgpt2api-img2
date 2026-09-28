@@ -102,8 +102,7 @@ export default function LoginPage() {
   };
 
   return (
-    <section className="relative grid min-h-[calc(100vh-1.5rem)] place-items-center overflow-hidden rounded-[32px] border border-white/55 bg-[linear-gradient(135deg,rgba(255,252,246,0.88),rgba(244,233,220,0.78)),radial-gradient(circle_at_top_left,rgba(241,186,102,0.22),transparent_30%),radial-gradient(circle_at_bottom_right,rgba(171,125,82,0.18),transparent_28%)] px-4 py-6 shadow-[0_40px_120px_-56px_rgba(76,50,26,0.42)] sm:px-6">
-      <div className="pointer-events-none absolute inset-y-0 left-0 w-1/2 bg-[radial-gradient(circle_at_left_center,_rgba(255,255,255,0.55),_transparent_64%)]" />
+    <section className="relative grid min-h-[calc(100vh-1.5rem)] place-items-center overflow-hidden rounded-2xl border border-border bg-background px-4 py-6 sm:px-6">
       <div className="relative grid w-full max-w-[1180px] gap-6 lg:grid-cols-[minmax(0,1.1fr)_460px] lg:items-center">
         <div className="hidden lg:block">
           <div className="max-w-[560px] space-y-7 px-6">
@@ -114,7 +113,6 @@ export default function LoginPage() {
             <div className="space-y-4">
               <h1
                 className="text-5xl leading-[1.02] font-semibold tracking-tight text-stone-950"
-                style={{ fontFamily: '"Iowan Old Style","Palatino Linotype","Book Antiqua",serif' }}
               >
                 进入更清晰的图像生成工作台。
               </h1>
@@ -125,7 +123,7 @@ export default function LoginPage() {
             <div className="grid gap-3">
               {highlights.map((item) => (
                 <div key={item} className="flex items-center gap-3 rounded-2xl border border-white/60 bg-white/50 px-4 py-3 text-stone-700 backdrop-blur-sm">
-                  <div className="flex size-10 items-center justify-center rounded-2xl bg-[#9c6034] text-white shadow-[0_16px_30px_-20px_rgba(156,96,52,0.9)]">
+                  <div className="flex size-10 items-center justify-center rounded-lg bg-primary text-primary-foreground">
                     <Wand2 className="size-4" />
                   </div>
                   <span className="text-sm font-medium">{item}</span>

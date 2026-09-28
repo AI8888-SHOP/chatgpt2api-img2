@@ -101,7 +101,7 @@ export function ImageComposer({
   };
 
   return (
-    <div className="glass-panel section-shell w-full overflow-hidden rounded-[20px] border border-white/60 shadow-[0_28px_90px_-54px_rgba(74,48,27,0.36)] sm:rounded-[30px]">
+    <div className="studio-composer">
       {mode === "edit" && (
         <input
           ref={fileInputRef}
@@ -116,11 +116,11 @@ export function ImageComposer({
         />
       )}
 
-      <div className="border-b border-white/55 px-3 py-2.5 sm:px-5 sm:py-3">
+      <div className="studio-composer-tabs">
         <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
           <ModeButton active={mode === "generate"} onClick={() => onModeChange("generate")}>文生图</ModeButton>
           <ModeButton active={mode === "edit"} onClick={() => onModeChange("edit")}>编辑图</ModeButton>
-          <div className="rounded-full bg-white/70 px-2.5 py-2 text-center text-xs font-medium text-stone-600 sm:px-3 sm:text-left">
+          <div className="studio-composer-credit">
             积分 {availableQuota} · 每张图消耗 1 积分
           </div>
           {hasAnyGenerating ? (
@@ -132,13 +132,13 @@ export function ImageComposer({
         </div>
       </div>
 
-      <div className="px-2.5 py-2.5 sm:px-5 sm:py-4">
+      <div className="studio-composer-body">
         {mode === "edit" && referenceImages.length > 0 ? (
           <div className="mb-4">
             <div className="mb-3 text-sm font-medium text-stone-700">参考图</div>
             <div className="grid grid-cols-4 gap-2 sm:flex sm:flex-wrap sm:gap-3">
               {referenceImages.map((image, index) => (
-                <div key={`${image.name}-${index}`} className="group relative aspect-square w-full sm:size-20">
+                <div key={`${image.name}-${index}`} className="studio-reference-thumb group relative aspect-square w-full sm:size-20">
                   <button
                     type="button"
                     onClick={() => {
@@ -180,7 +180,7 @@ export function ImageComposer({
           </div>
         ) : null}
 
-        <div className="relative rounded-[18px] border border-white/60 bg-white/60 p-2 sm:rounded-[28px] sm:p-3">
+        <div className="studio-prompt-box">
           <ImageLightbox
             images={lightboxImages}
             currentIndex={lightboxIndex}
@@ -207,7 +207,7 @@ export function ImageComposer({
 
           <div className="mt-2 flex flex-col gap-2 border-t border-stone-200/70 pt-2 sm:mt-3 sm:gap-3 sm:pt-3">
             <div className="flex flex-col gap-1.5 sm:gap-3">
-              <div className="grid min-w-0 grid-cols-2 gap-1.5 sm:flex sm:flex-wrap sm:items-center sm:gap-2">
+              <div className="studio-composer-controls">
                 {mode === "edit" ? (
                   <Button
                     type="button"
@@ -245,13 +245,13 @@ export function ImageComposer({
                   <QuickPromptSelect prompts={quickPrompts} onSelect={onQuickPromptSelect} />
                 ) : null}
 
-                <div className="col-span-2 grid w-full min-w-0 grid-cols-2 gap-1.5 sm:gap-2">
+                <div className="studio-composer-actions">
                   <button
                     type="button"
                     onClick={() => void onOptimizePrompt()}
                     disabled={!prompt.trim() || isOptimizingPrompt}
                     aria-label="AI 优化提示词"
-                    className="inline-flex h-10 min-w-0 items-center justify-center gap-1 whitespace-nowrap rounded-full border border-amber-200 bg-amber-50 px-2 text-xs font-medium text-amber-900 shadow-none transition hover:bg-amber-100 disabled:cursor-not-allowed disabled:bg-stone-100 disabled:text-stone-400"
+                    className="studio-optimize-button"
                   >
                     {isOptimizingPrompt ? <LoaderCircle className="size-3.5 animate-spin sm:size-4" /> : <Sparkles className="size-3.5 sm:size-4" />}
                     <span>AI 优化提示词</span>
@@ -261,7 +261,7 @@ export function ImageComposer({
                     type="button"
                     onClick={() => void onSubmit()}
                     disabled={isOptimizingPrompt || !prompt.trim() || (mode === "edit" && referenceImages.length === 0)}
-                    className="inline-flex h-10 min-w-0 items-center justify-center gap-1 whitespace-nowrap rounded-full bg-stone-950 px-2 text-xs font-medium text-white shadow-[0_16px_28px_-18px_rgba(28,25,23,0.86)] transition hover:bg-stone-800 disabled:cursor-not-allowed disabled:bg-stone-300"
+                    className="studio-generate-button"
                   >
                     <ArrowUp className="size-3.5 sm:size-4" />
                     <span>开始生成</span>
@@ -359,12 +359,9 @@ function ModeButton({ active, children, onClick }: { active: boolean; children: 
     <button
       type="button"
       onClick={onClick}
-      className={cn(
-        "rounded-full border px-3.5 py-2 text-xs font-medium transition",
-        active
-          ? "border-stone-950 bg-stone-950 text-white"
-          : "border-white/70 bg-white/70 text-stone-600 hover:border-stone-300 hover:bg-white/85",
-      )}
+      aria-pressed={active}
+      data-composer-mode
+      className="studio-mode-button"
     >
       {children}
     </button>

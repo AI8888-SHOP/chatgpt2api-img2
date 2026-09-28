@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type SetStateAction } from "react";
 import { toast } from "sonner";
+import { History, Plus } from "lucide-react";
+import { useDesign } from "@/components/design-provider";
 
 import { ImageComposer } from "@/app/image/components/image-composer";
 import { ImageResults } from "@/app/image/components/image-results";
@@ -231,6 +233,8 @@ async function resultImageToReference(src: string, index: number): Promise<Store
 }
 
 export default function ImagePage() {
+  const { variant } = useDesign();
+  const [canvasTurnId, setCanvasTurnId] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const conversationsRef = useRef<ImageConversation[]>([]);
@@ -290,7 +294,7 @@ export default function ImagePage() {
   useEffect(() => {
     const panel = resultsScrollRef.current;
     if (panel && selectedTurns.length) panel.scrollTo({ top: panel.scrollHeight, behavior: "smooth" });
-  }, [selectedConversationId, selectedTurns.length]);
+  }, [selectedConversationId, selectedTurns.length, variant]);
 
   useEffect(() => {
     conversationsRef.current = conversations;
@@ -307,7 +311,7 @@ export default function ImagePage() {
     const handleOpenHistory = () => {
       window.sessionStorage.removeItem("image:open-history");
       pendingHistoryScrollRef.current = true;
-      if (isWideLayout) {
+      if (isWideLayout && variant === "a") {
         setHistoryCollapsed(false);
       } else {
         setMobileHistoryOpen(true);
@@ -320,7 +324,7 @@ export default function ImagePage() {
       handleOpenHistory();
     }
     return () => window.removeEventListener("image:open-history", handleOpenHistory);
-  }, [isWideLayout]);
+  }, [isWideLayout, variant]);
 
   useEffect(() => {
     if (!pendingHistoryScrollRef.current) return;
@@ -431,7 +435,7 @@ export default function ImagePage() {
 
   useEffect(() => {
     const syncWideLayout = () => {
-      setIsWideLayout(window.innerWidth >= 1280);
+      setIsWideLayout(window.innerWidth >= 1024);
     };
 
     syncWideLayout();
@@ -1080,11 +1084,16 @@ export default function ImagePage() {
     />
   );
 
+  const canvasTurn = selectedTurns.find(turn => turn.id === canvasTurnId) ?? selectedTurns[selectedTurns.length - 1] ?? null;
+  const visibleTurns = variant === "b" ? (canvasTurn ? [canvasTurn] : []) : selectedTurns;
+
+  useEffect(() => setCanvasTurnId(null), [selectedConversationId, selectedTurns.length]);
+
   const resultsPanel = (
     <div className="space-y-8">
-      {selectedTurns.length ? selectedTurns.map((turn, index) => (
+      {visibleTurns.length ? visibleTurns.map((turn) => (
         <div key={turn.id} className="space-y-4">
-          <div className="text-center text-xs text-stone-500 dark:text-slate-400">第 {index + 1} 轮</div>
+          <div className="text-center text-xs text-stone-500 dark:text-slate-400">第 {selectedTurns.indexOf(turn) + 1} 轮</div>
           {renderTurn(turn)}
         </div>
       )) : renderTurn(null)}
@@ -1126,102 +1135,42 @@ export default function ImagePage() {
 
   return (
     <>
-      <section
-        className="grid w-full min-w-0 grid-cols-1 gap-3 sm:gap-4 xl:h-[calc(100dvh-9rem)] xl:min-h-[560px] xl:grid-rows-1"
-        style={
-          isWideLayout
-            ? {
-                gridTemplateColumns: historyCollapsed
-                  ? "92px minmax(0,1.22fr) minmax(340px,0.78fr)"
-                  : "280px minmax(0,1.24fr) minmax(360px,0.8fr)",
-              }
-            : undefined
-        }
-      >
-        <div ref={historyPanelRef} className="order-1 hidden min-h-0 xl:order-1 xl:block">
-          <div className="hide-scrollbar max-h-[22dvh] overflow-y-auto xl:h-full xl:max-h-none xl:pr-1">
-            <ImageSidebar
-              conversations={threadSummaries}
-              isLoadingHistory={isLoadingHistory}
-              generatingIds={generatingThreadIds}
-              selectedConversationId={selectedConversationId}
-              collapsed={isWideLayout ? historyCollapsed : !mobileHistoryOpen}
-              onToggleCollapsed={() => {
-                if (isWideLayout) {
-                  setHistoryCollapsed((prev) => !prev);
-                } else {
-                  setMobileHistoryOpen((prev) => !prev);
-                }
-              }}
-              onSelectConversation={handleSelectConversation}
-              onDeleteConversation={handleDeleteConversation}
-              formatConversationTime={formatConversationTime}
-            />
-          </div>
+      <section className={cn("studio-workspace", historyCollapsed && "history-collapsed")} data-layout={variant} aria-label={variant === "a" ? "雾白靛蓝对话工作台" : "石墨青绿画布工作台"}>
+        <div ref={historyPanelRef} className="studio-history-panel">
+          <ImageSidebar
+            conversations={threadSummaries} isLoadingHistory={isLoadingHistory}
+            generatingIds={generatingThreadIds} selectedConversationId={selectedConversationId}
+            collapsed={historyCollapsed} onToggleCollapsed={() => setHistoryCollapsed(value => !value)}
+            onSelectConversation={handleSelectConversation} onDeleteConversation={handleDeleteConversation}
+            formatConversationTime={formatConversationTime} onNewConversation={handleNewConversation}
+          />
         </div>
-
-        <div className={cn("order-2 flex min-w-0 flex-col overflow-hidden rounded-[22px] border border-stone-200 bg-[#fbfbfa] shadow-[0_14px_40px_-30px_rgba(15,23,42,0.18)] sm:rounded-[30px] xl:h-full xl:min-h-0", selectedTurns.length ? "h-[55dvh] min-h-[320px]" : "h-auto")}>
-          <div className="shrink-0 border-b border-stone-200 px-3 py-2 sm:px-5 sm:py-4">
-            <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
-              <div>
-                <div className="hidden text-[10px] font-semibold uppercase tracking-[0.22em] text-stone-500 sm:block">Workspace</div>
-                <h1 className="text-base font-semibold tracking-tight text-stone-950 sm:mt-1 sm:text-xl">结果会话</h1>
-                <p className="mt-2 hidden max-w-2xl text-sm leading-6 text-stone-500 sm:block">
-                  同一对话按轮次保留提示词和图片，可复用任一轮输入继续生成。
-                </p>
-              </div>
-              <div className="hidden flex-wrap items-center gap-2 text-xs font-medium text-stone-500 sm:flex">
-                <span className="rounded-full bg-white px-3 py-1.5 shadow-sm">会话 {threadSummaries.length}</span>
-                <span className="rounded-full bg-white px-3 py-1.5 shadow-sm">运行中 {generatingIds.size}</span>
-                <span className="rounded-full bg-white px-3 py-1.5 shadow-sm">积分 {availableQuota}</span>
-                <span className="rounded-full bg-white px-3 py-1.5 shadow-sm">每张图消耗 1 积分</span>
-              </div>
-            </div>
+        <div className="studio-results-panel">
+          <header className="studio-results-heading">
+            <div className="min-w-0"><h1 className="truncate text-base font-medium">{selectedConversation?.title || "开始创作"}</h1><span className="text-xs text-muted-foreground">{selectedTurns.length ? selectedTurns.length + " 轮对话 · 随时继续修改" : "描述画面，或上传参考图"}</span></div>
+            <div className="flex shrink-0 items-center gap-2"><span className="studio-quota">积分 {availableQuota}</span><button type="button" className="studio-icon-button" aria-label="查看对话历史" onClick={() => { if (isWideLayout && variant === "a") setHistoryCollapsed(false); else setMobileHistoryOpen(true); }}><History size={17} /></button></div>
+          </header>
+          <div ref={resultsScrollRef} data-testid="image-results-scroll" className="studio-results-scroll">
+            <div className="studio-results-inner">{resultsPanel}</div>
           </div>
-
-          <div ref={resultsScrollRef} data-testid="image-results-scroll" className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2.5 py-2.5 sm:px-4 sm:py-4">
-            <div className="mx-auto w-full max-w-[1100px]">{resultsPanel}</div>
-          </div>
+          {variant === "b" && selectedTurns.length > 0 && <nav className="studio-rounds" aria-label="生成轮次">{selectedTurns.map((turn, index) => <button key={turn.id} type="button" aria-pressed={turn.id === canvasTurn?.id} onClick={() => setCanvasTurnId(turn.id)}>第 {index + 1} 轮{generatingIds.has(turn.id) ? " · 生成中" : ""}</button>)}</nav>}
         </div>
-
-        <div className="order-3 min-h-0 min-w-0 xl:order-3">
-          <div className="xl:h-full xl:overflow-y-auto xl:pl-1">
-            <div className="overflow-hidden rounded-[22px] border border-stone-200 bg-[#fbfbfa] shadow-[0_14px_40px_-30px_rgba(15,23,42,0.18)] sm:rounded-[30px]">
-              <div className="hidden border-b border-stone-200 px-4 py-3 sm:block">
-                <h2 className="text-base font-semibold tracking-tight text-stone-950">图像输入</h2>
-              </div>
-              <div className="flex items-center justify-between gap-2 border-b border-stone-200 px-3 py-2 text-xs dark:border-slate-700">
-                <span className="text-stone-500 dark:text-slate-400">
-                  {continuingThreadId ? `继续当前对话 · 已有 ${selectedTurns.length} 轮` : "新对话"}
-                </span>
-                <button type="button" onClick={handleNewConversation} className="rounded-full border border-stone-300 px-3 py-1.5 dark:border-slate-600">
-                  新建对话
-                </button>
-              </div>
-              <div className="p-2 sm:p-3">{composerPanel}</div>
-            </div>
-          </div>
+        <div className="studio-composer-panel">
+          <div className="studio-composer-heading"><span>{continuingThreadId ? "继续当前对话 · 已有 " + selectedTurns.length + " 轮" : "新对话"}</span><button type="button" onClick={handleNewConversation} className="studio-text-button"><Plus size={15} />新建对话</button></div>
+          {composerPanel}
         </div>
       </section>
 
-      {!isWideLayout ? (
-        <SideDrawer open={mobileHistoryOpen} onOpenChange={setMobileHistoryOpen} title="图片历史记录">
-            <ImageSidebar
-              conversations={threadSummaries}
-              isLoadingHistory={isLoadingHistory}
-              generatingIds={generatingThreadIds}
-              selectedConversationId={selectedConversationId}
-              collapsed={false}
-              onToggleCollapsed={() => setMobileHistoryOpen(false)}
-              onSelectConversation={(id) => {
-                handleSelectConversation(id);
-                setMobileHistoryOpen(false);
-              }}
-              onDeleteConversation={handleDeleteConversation}
-              formatConversationTime={formatConversationTime}
-            />
-        </SideDrawer>
-      ) : null}
+      {(!isWideLayout || variant === "b") && <SideDrawer open={mobileHistoryOpen} onOpenChange={setMobileHistoryOpen} title="图片历史记录">
+        <ImageSidebar
+          conversations={threadSummaries} isLoadingHistory={isLoadingHistory}
+          generatingIds={generatingThreadIds} selectedConversationId={selectedConversationId}
+          collapsed={false} onToggleCollapsed={() => setMobileHistoryOpen(false)}
+          onSelectConversation={(id) => { handleSelectConversation(id); setMobileHistoryOpen(false); }}
+          onDeleteConversation={handleDeleteConversation} formatConversationTime={formatConversationTime}
+          onNewConversation={() => { handleNewConversation(); setMobileHistoryOpen(false); }}
+        />
+      </SideDrawer>}
 
       <ImageLightbox
         images={lightboxImages}

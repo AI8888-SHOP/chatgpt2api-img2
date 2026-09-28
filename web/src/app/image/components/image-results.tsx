@@ -49,7 +49,6 @@ export function ImageResults({
           </div>
           <h2
             className="mt-3 text-lg font-semibold tracking-tight text-stone-950 sm:mt-6 sm:text-3xl dark:text-slate-100"
-            style={{ fontFamily: '"Iowan Old Style","Palatino Linotype","Book Antiqua",serif' }}
           >
             把想法变成图像
           </h2>
@@ -57,18 +56,14 @@ export function ImageResults({
             输入画面描述开始生成，或上传参考图进行编辑。完成的图片会保存在历史记录中。
           </p>
 
-          <div className="mt-4 hidden gap-3 text-left sm:grid md:grid-cols-3">
-            <IntroCard title="Prompt" text="先把目标画面、镜头、风格和材质说明白。" />
-            <IntroCard title="Reference" text="编辑模式下直接挂参考图和遮罩，避免上下文丢失。" />
-            <IntroCard title="Result" text="每次出图都以会话形式沉淀，便于回看和对比。" />
-          </div>
+
         </div>
       </div>
     );
   }
 
   return (
-    <div className="flex w-full flex-col gap-5 sm:gap-6">
+    <div className="studio-turn flex w-full flex-col gap-4">
       <ImageLightbox
         images={referenceLightboxImages}
         currentIndex={referenceLightboxIndex}
@@ -77,7 +72,7 @@ export function ImageResults({
         onIndexChange={setReferenceLightboxIndex}
       />
 
-      <section className="flex justify-end">
+      <section className="studio-turn-prompt flex justify-end">
         <div className="flex w-full flex-col items-end gap-3 sm:max-w-[86%] 2xl:max-w-[78%]">
           {selectedConversation.referenceImages?.length ? (
             <div className="flex flex-wrap justify-end gap-2.5">
@@ -113,13 +108,13 @@ export function ImageResults({
             <button
               type="button"
               onClick={() => onReuseConversation(selectedConversation)}
-              className="inline-flex h-9 items-center justify-center gap-2 rounded-full bg-stone-950 px-4 text-xs font-medium text-white shadow-[0_16px_28px_-18px_rgba(28,25,23,0.8)] transition hover:bg-stone-800 dark:bg-cyan-300 dark:text-slate-950 dark:hover:bg-cyan-200"
+              className="studio-reuse-button"
             >
               <RotateCcw className="size-3.5" />
               复用并继续对话
             </button>
 
-            <div className="flex flex-wrap justify-end gap-1.5 text-xs font-medium text-stone-500 sm:gap-2">
+            <div className="studio-result-meta">
               <MetaChip>{selectedConversation.mode === "edit" ? "编辑图" : "文生图"}</MetaChip>
               <MetaChip>{selectedConversation.model}</MetaChip>
               <MetaChip>{selectedConversation.count} 张</MetaChip>
@@ -136,25 +131,9 @@ export function ImageResults({
         </div>
       </section>
 
-      <section className="flex justify-start">
-        <div className="w-full rounded-[22px] border border-stone-200 bg-white px-3 py-4 shadow-[0_10px_34px_rgba(15,23,42,0.05)] sm:max-w-[96%] sm:rounded-[28px] sm:px-5 sm:py-5 dark:border-slate-700/75 dark:bg-slate-900/72 dark:shadow-[0_18px_60px_rgba(0,0,0,0.22)]">
-          <div className="mb-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-stone-500 dark:text-cyan-200/70">Assistant</div>
-              <div className="mt-1 text-sm font-medium text-stone-900 dark:text-slate-100">图像结果回复</div>
-              <p className="mt-2 text-sm leading-6 text-stone-500 dark:text-slate-400">
-                {selectedConversation.status === "error"
-                  ? "这轮请求已返回部分结果，同时包含失败信息。"
-                  : isSelectedGenerating
-                    ? "我正在继续补齐这轮结果，完成后会自动刷新到当前会话。"
-                    : "这轮请求已经完成，下面是当前会话返回的图像结果。"}
-              </p>
-            </div>
-            <div className="flex flex-wrap gap-2 text-xs font-medium text-stone-500 sm:justify-end">
-              <MetaChip>{selectedConversation.mode === "edit" ? "编辑图" : "文生图"}</MetaChip>
-              <MetaChip icon={<Images className="size-3.5" />}>{selectedConversation.count} 张输出</MetaChip>
-            </div>
-          </div>
+      <section className="studio-turn-images flex justify-start">
+        <div className="studio-result-reply">
+          <div className="mb-3 flex items-center gap-2 text-sm font-medium"><Sparkles size={16} className="text-primary" />{isSelectedGenerating ? "图像生成中" : selectedConversation.status === "error" ? "图像结果 · 含失败任务" : "图像已就绪"}<span className="text-xs font-normal text-muted-foreground">· {selectedConversation.images.length} 张</span></div>
 
           {selectedConversation.status === "error" && selectedConversation.images.length === 0 ? (
             <div className="rounded-[22px] border border-rose-200 bg-rose-50 px-4 py-4 text-sm leading-6 text-rose-700 dark:border-rose-300/25 dark:bg-rose-500/10 dark:text-rose-200">
@@ -163,7 +142,7 @@ export function ImageResults({
           ) : null}
 
           {selectedConversation.images.length > 0 ? (
-            <section className="columns-1 gap-3 space-y-3 pt-1 sm:columns-2 sm:gap-4 sm:space-y-4 2xl:columns-3">
+            <section className="studio-image-grid" data-count={selectedConversation.images.length}>
               {selectedConversation.images.map((image, index) => (
                 <div key={image.id} className="break-inside-avoid overflow-hidden rounded-[24px]">
                   <ImageResultCard
@@ -197,15 +176,6 @@ export function ImageResults({
   );
 }
 
-function IntroCard({ title, text }: { title: string; text: string }) {
-  return (
-    <div className="rounded-[24px] border border-stone-200 bg-white p-4 shadow-sm dark:border-slate-700/75 dark:bg-slate-900/72">
-      <div className="text-xs font-semibold uppercase tracking-[0.24em] text-stone-500 dark:text-cyan-200/70">{title}</div>
-      <div className="mt-2 text-sm leading-7 text-stone-700 dark:text-slate-300">{text}</div>
-    </div>
-  );
-}
-
 function MetaChip({
   children,
   icon,
@@ -214,7 +184,7 @@ function MetaChip({
   icon?: React.ReactNode;
 }) {
   return (
-    <span className="inline-flex items-center gap-1 rounded-full bg-white px-3 py-1.5 shadow-sm dark:bg-slate-800/78 dark:text-slate-300 dark:ring-1 dark:ring-white/6">
+    <span className="inline-flex items-center gap-1">
       {icon}
       {children}
     </span>
@@ -242,15 +212,16 @@ function ImageResultCard({
 
   if (image.status === "success" && imageSrc) {
     return (
-      <div className="group relative overflow-hidden rounded-[24px] border border-stone-200 bg-white text-left shadow-[0_10px_34px_rgba(15,23,42,0.06)] transition hover:border-stone-300 dark:border-slate-700/75 dark:bg-slate-900/72 dark:hover:border-cyan-300/30">
+      <div className="studio-image-card group">
         <button type="button" onClick={() => onOpen(image.id)} className="block w-full cursor-zoom-in text-left" aria-label={`查看结果图 ${index + 1}`}>
           <img
+            data-image-result
             src={imageSrc}
             alt={`Generated result ${index + 1}`}
             className="block h-auto w-full transition duration-200 group-hover:scale-[1.01] group-hover:brightness-[0.97]"
           />
         </button>
-        <div className="absolute right-3 top-3 flex flex-col gap-2 opacity-100 transition sm:flex-row sm:opacity-0 sm:group-hover:opacity-100">
+        <div className="studio-image-actions">
           <button
             type="button"
             onClick={() => void onUseAsReference(image, index)}

@@ -126,6 +126,19 @@ class UserService:
                     created_at INTEGER NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS user_ui_trial (
+                    user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                    assigned_variant TEXT NOT NULL CHECK (assigned_variant IN ('a', 'b')),
+                    current_variant TEXT NOT NULL CHECK (current_variant IN ('a', 'b')),
+                    preference TEXT CHECK (preference IN ('a', 'b', 'equal')),
+                    seen_a INTEGER NOT NULL DEFAULT 0,
+                    seen_b INTEGER NOT NULL DEFAULT 0,
+                    switches INTEGER NOT NULL DEFAULT 0,
+                    first_seen INTEGER NOT NULL DEFAULT 0,
+                    last_seen INTEGER NOT NULL DEFAULT 0,
+                    voted_at INTEGER NOT NULL DEFAULT 0
+                );
+
                 CREATE TABLE IF NOT EXISTS user_api_keys (
                     key TEXT PRIMARY KEY,
                     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,

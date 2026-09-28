@@ -12,7 +12,7 @@ import secrets
 from threading import Event, Lock, Thread
 import time
 import uuid
-from typing import Any, Iterator
+from typing import Any, Iterator, Literal
 from fastapi import APIRouter, Cookie, FastAPI, File, Form, Header, HTTPException, Request, Response, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
@@ -42,6 +42,7 @@ from services.register_service import (
 )
 from services.usage_service import UsageRecord, usage_service
 from services.user_service import user_service
+from services.ui_trial_service import get_trial, update_trial, trial_stats
 from services.sub2api_service import (
     list_remote_accounts as sub2api_list_remote_accounts,
     list_remote_groups as sub2api_list_remote_groups,
@@ -63,6 +64,12 @@ from utils.helper import (
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 WEB_DIST_DIR = BASE_DIR / "web_dist"
+
+
+class UiTrialRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    variant: Literal['a', 'b'] | None = None
+    preference: Literal['a', 'b', 'equal'] | None = None
 
 
 class ImageGenerationRequest(BaseModel):
@@ -986,6 +993,29 @@ def create_app() -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=401, detail={"error": str(exc)}) from exc
         return {"token": token, "user": user.to_public_dict()}
+
+    @router.get("/v1/user/ui-trial")
+    async def get_user_ui_trial(authorization: str | None = Header(default=None)):
+        if not extract_bearer_token(authorization).startswith("usr_"):
+            raise HTTPException(status_code=403, detail={"error": "界面试用仅支持网页登录会话"})
+        _, user = require_user(authorization)
+        return get_trial(user_service, user.id)
+
+    @router.post("/v1/user/ui-trial")
+    async def save_user_ui_trial(body: UiTrialRequest, authorization: str | None = Header(default=None)):
+        if not extract_bearer_token(authorization).startswith("usr_"):
+            raise HTTPException(status_code=403, detail={"error": "界面试用仅支持网页登录会话"})
+        _, user = require_user(authorization)
+        try:
+            return update_trial(user_service, user.id, variant=body.variant, preference=body.preference,
+                                update_preference='preference' in body.model_fields_set)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+
+    @router.get("/api/ui-trial/stats")
+    async def get_ui_trial_stats(days: int = 7, authorization: str | None = Header(default=None)):
+        require_auth_key(authorization)
+        return trial_stats(user_service, days)
 
     @router.get("/v1/key/info")
     async def get_user_key_info(authorization: str | None = Header(default=None)):

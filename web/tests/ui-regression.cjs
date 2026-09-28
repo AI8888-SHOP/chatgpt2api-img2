@@ -8,6 +8,7 @@ const { chromium } = require(process.env.PLAYWRIGHT_PATH || 'playwright');
 const base = process.env.BASE_URL || 'http://127.0.0.1:3031';
 const out = process.env.UI_ARTIFACTS || '/tmp/chatgpt2api-ui-audit';
 const audit = process.env.AUDIT_ONLY === '1';
+const design = process.env.UI_DESIGN === 'b' ? 'b' : 'a';
 const pixel = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="640" height="420"><rect width="640" height="420" fill="#b8ded7"/><path d="M0 420L200 100L400 420M250 420L480 160L640 420" fill="#538d83"/></svg>');
 const conversations = Array.from({ length: 40 }, (_, i) => ({
   id: `turn-${i}`, threadId: i < 2 ? 'thread-main' : `thread-${i}`,
@@ -47,6 +48,7 @@ function check(name, ok, detail) {
         if (request.method() !== 'GET') writes.push(p);
         let body = {};
         if (p === '/app-config') body = { site_title: '绘图 UI 测试', quick_prompts: [], registration_enabled: true };
+        else if (p === '/v1/user/ui-trial') body = { trial_id: 'studio-2026-09', assigned_variant: design, variant: design, preference: null, seen_a: true, seen_b: true };
         else if (p === '/v1/key/info') body = { remaining: 100, user: { username: 'UI 测试用户' } };
         else if (p === '/v1/image-conversations') body = request.method() === 'GET' ? { items: conversations } : { success: true };
         else if (p === '/v1/image-prompts/optimize') {
@@ -64,9 +66,7 @@ function check(name, ok, detail) {
       await prompt.waitFor();
       await page.waitForTimeout(900);
       const layout = await page.evaluate(() => {
-        const heading = Array.from(document.querySelectorAll('h1')).find(el => el.textContent === '结果会话');
-        const panel = heading?.closest('.order-2');
-        const scroll = panel?.lastElementChild;
+        const scroll = document.querySelector('[data-testid=image-results-scroll]');
         return { viewport: innerWidth, document: document.documentElement.scrollWidth, resultHeight: scroll?.clientHeight, pageScrollY: scrollY };
       });
       check(`layout-${width}`, layout.document <= width && layout.resultHeight >= 150, layout);
@@ -146,7 +146,8 @@ function check(name, ok, detail) {
       await page.evaluate(() => document.documentElement.classList.add('dark'));
       if (width === 390) {
         const colors = await page.locator('.whitespace-pre-wrap').first().evaluate(el => ({ background: getComputedStyle(el).backgroundColor, color: getComputedStyle(el).color }));
-        const darkBackground = colors.background.startsWith('oklab(') && parseFloat(colors.background.slice(6)) < 0.5;
+        const channels = colors.background.match(/[\d.]+/g)?.map(Number) || [];
+        const darkBackground = colors.background.startsWith('oklab(') ? channels[0] < 0.5 : colors.background.startsWith('rgb') && channels.slice(0, 3).every(value => value < 110);
         check('dark-prompt-background', darkBackground, colors);
       }
       await page.screenshot({ path: `${out}/image-dark-${width}.png`, fullPage: true });
