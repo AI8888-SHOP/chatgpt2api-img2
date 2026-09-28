@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type SetStateAction } from "react";
 import { toast } from "sonner";
 
 import { ImageComposer } from "@/app/image/components/image-composer";
@@ -8,6 +8,7 @@ import { ImageResults } from "@/app/image/components/image-results";
 import { ImageSidebar } from "@/app/image/components/image-sidebar";
 import { MaskEditor } from "@/app/image/components/mask-editor";
 import { ImageLightbox } from "@/components/image-lightbox";
+import { SideDrawer } from "@/components/ui/side-drawer";
 import {
   createImageEditJob,
   createImageGenerationJob,
@@ -238,8 +239,16 @@ export default function ImagePage() {
   const resumingConversationIdsRef = useRef<Set<string>>(new Set());
   const mountedRef = useRef(true);
   const resultsEndRef = useRef<HTMLDivElement>(null);
+  const resultsScrollRef = useRef<HTMLDivElement>(null);
+  const promptRevisionRef = useRef(0);
+  const optimizingRef = useRef(false);
+  const referenceRevisionRef = useRef(0);
 
-  const [imagePrompt, setImagePrompt] = useState("");
+  const [imagePrompt, setImagePromptState] = useState("");
+  const setImagePrompt = useCallback((value: SetStateAction<string>) => {
+    promptRevisionRef.current += 1;
+    setImagePromptState(value);
+  }, []);
   const [imageCount, setImageCount] = useState("1");
   const [imageMode, setImageMode] = useState<ImageConversationMode>("generate");
   const [imageModel, setImageModel] = useState<ImageModel>(DEFAULT_IMAGE_MODEL);
@@ -275,11 +284,12 @@ export default function ImagePage() {
     conversations.filter((item) => generatingIds.has(item.id)).map(getImageThreadId),
   ), [conversations, generatingIds]);
   const selectedConversation = selectedTurns[selectedTurns.length - 1] ?? null;
-  const parsedCount = useMemo(() => Math.max(1, Math.min(10, Number(imageCount) || 1)), [imageCount]);
+  const parsedCount = useMemo(() => Math.max(1, Math.min(10, Math.trunc(Number(imageCount) || 1))), [imageCount]);
   const hasAnyGenerating = generatingIds.size > 0;
 
   useEffect(() => {
-    resultsEndRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    const panel = resultsScrollRef.current;
+    if (panel && selectedTurns.length) panel.scrollTo({ top: panel.scrollHeight, behavior: "smooth" });
   }, [selectedConversationId, selectedTurns.length]);
 
   useEffect(() => {
@@ -287,6 +297,7 @@ export default function ImagePage() {
   }, [conversations]);
 
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
       mountedRef.current = false;
     };
@@ -589,6 +600,7 @@ export default function ImagePage() {
   ]);
 
   const resetComposer = useCallback(() => {
+    referenceRevisionRef.current += 1;
     setImagePrompt("");
     setReferenceImageFiles([]);
     setReferenceImages([]);
@@ -615,6 +627,7 @@ export default function ImagePage() {
   }, [resetComposer]);
 
   const applyReferenceImagesToComposer = useCallback((images: StoredReferenceImage[]) => {
+    referenceRevisionRef.current += 1;
     const available = images.filter((image) => image.dataUrl?.startsWith("data:image/"));
     setReferenceImages(available);
     setReferenceImageFiles(available.map(referenceImageToFile));
@@ -762,17 +775,24 @@ export default function ImagePage() {
     async (files: File[]) => {
       const imageFiles = files.filter((file) => file.type.startsWith("image/"));
       if (imageFiles.length === 0) return;
-      const newFiles = [...referenceImageFiles, ...imageFiles];
-      setReferenceImageFiles(newFiles);
-      const storedImages = await Promise.all(
-        imageFiles.map(async (file) => ({ name: file.name, type: file.type || "image/png", dataUrl: await readFileAsDataUrl(file) })),
-      );
-      setReferenceImages((prev) => [...prev, ...storedImages]);
+      const revision = referenceRevisionRef.current;
+      try {
+        const storedImages = await Promise.all(
+          imageFiles.map(async (file) => ({ name: file.name, type: file.type || "image/png", dataUrl: await readFileAsDataUrl(file) })),
+        );
+        if (!mountedRef.current || revision !== referenceRevisionRef.current) return;
+        // Commit both lists together; failed/stale reads must not leave ghost files.
+        setReferenceImageFiles((prev) => [...prev, ...imageFiles]);
+        setReferenceImages((prev) => [...prev, ...storedImages]);
+      } catch {
+        if (mountedRef.current) toast.error("读取参考图失败，请重新选择图片");
+      }
     },
-    [referenceImageFiles],
+    [],
   );
 
   const handleRemoveReferenceImage = useCallback((index: number) => {
+    referenceRevisionRef.current += 1;
     setReferenceImageFiles((prev) => prev.filter((_, i) => i !== index));
     setReferenceImages((prev) => prev.filter((_, i) => i !== index));
   }, []);
@@ -1004,18 +1024,26 @@ export default function ImagePage() {
   ]);
 
   const handleOptimizePrompt = useCallback(async () => {
+    if (optimizingRef.current) return;
     const prompt = imagePrompt.trim();
     if (!prompt) {
       toast.error("请输入提示词");
       return;
     }
 
+    const revision = promptRevisionRef.current;
+    optimizingRef.current = true;
     setIsOptimizingPrompt(true);
     try {
       const result = await optimizeImagePrompt(prompt);
       const optimizedPrompt = result.optimized_prompt.trim();
       if (!optimizedPrompt) {
         throw new Error("优化失败");
+      }
+      if (!mountedRef.current) return;
+      if (revision !== promptRevisionRef.current) {
+        toast.info("输入已变更，已保留你的新内容，请按需重新优化");
+        return;
       }
       setImagePrompt(optimizedPrompt);
       if (result.truncated) toast.info("提示词已优化，输出已按长度上限截取");
@@ -1024,7 +1052,8 @@ export default function ImagePage() {
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "优化提示词失败");
     } finally {
-      setIsOptimizingPrompt(false);
+      optimizingRef.current = false;
+      if (mountedRef.current) setIsOptimizingPrompt(false);
     }
   }, [imagePrompt]);
 
@@ -1098,7 +1127,7 @@ export default function ImagePage() {
   return (
     <>
       <section
-        className="grid min-h-[calc(100dvh-7rem)] w-full grid-cols-1 gap-2 overflow-visible sm:h-[calc(100dvh-6.25rem)] sm:min-h-0 sm:grid-rows-[auto_minmax(0,1fr)_auto] sm:gap-4 sm:overflow-hidden xl:h-[calc(100vh-7.8rem)] xl:grid-rows-none"
+        className="grid w-full min-w-0 grid-cols-1 gap-3 sm:gap-4 xl:h-[calc(100dvh-9rem)] xl:min-h-[560px] xl:grid-rows-1"
         style={
           isWideLayout
             ? {
@@ -1131,8 +1160,8 @@ export default function ImagePage() {
           </div>
         </div>
 
-        <div className="order-2 flex h-[min(50dvh,420px)] min-h-[260px] flex-col overflow-hidden rounded-[22px] border border-stone-200 bg-[#fbfbfa] shadow-[0_14px_40px_-30px_rgba(15,23,42,0.18)] sm:h-auto sm:min-h-0 sm:rounded-[30px] xl:order-2">
-          <div className="border-b border-stone-200 px-3 py-2 sm:px-5 sm:py-4">
+        <div className={cn("order-2 flex min-w-0 flex-col overflow-hidden rounded-[22px] border border-stone-200 bg-[#fbfbfa] shadow-[0_14px_40px_-30px_rgba(15,23,42,0.18)] sm:rounded-[30px] xl:h-full xl:min-h-0", selectedTurns.length ? "h-[55dvh] min-h-[320px]" : "h-auto")}>
+          <div className="shrink-0 border-b border-stone-200 px-3 py-2 sm:px-5 sm:py-4">
             <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
               <div>
                 <div className="hidden text-[10px] font-semibold uppercase tracking-[0.22em] text-stone-500 sm:block">Workspace</div>
@@ -1150,20 +1179,16 @@ export default function ImagePage() {
             </div>
           </div>
 
-          <div className="hide-scrollbar min-h-0 flex-1 overflow-y-auto px-2.5 py-2.5 sm:px-4 sm:py-4">
+          <div ref={resultsScrollRef} data-testid="image-results-scroll" className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2.5 py-2.5 sm:px-4 sm:py-4">
             <div className="mx-auto w-full max-w-[1100px]">{resultsPanel}</div>
           </div>
         </div>
 
-        <div className="order-3 min-h-0 xl:order-3">
-          <div className="hide-scrollbar xl:h-full xl:overflow-y-auto xl:pl-1">
+        <div className="order-3 min-h-0 min-w-0 xl:order-3">
+          <div className="xl:h-full xl:overflow-y-auto xl:pl-1">
             <div className="overflow-hidden rounded-[22px] border border-stone-200 bg-[#fbfbfa] shadow-[0_14px_40px_-30px_rgba(15,23,42,0.18)] sm:rounded-[30px]">
-              <div className="hidden border-b border-stone-200 px-3 py-2.5 sm:block sm:px-5 sm:py-4">
-                <div className="hidden text-[10px] font-semibold uppercase tracking-[0.22em] text-stone-500 sm:block">Composer</div>
-                <h2 className="text-base font-semibold tracking-tight text-stone-950 sm:mt-1 sm:text-xl">图像输入面板</h2>
-                <p className="mt-2 hidden text-sm leading-6 text-stone-500 sm:block">
-                  输入器保持单独一列，避免和结果阅读区混在一起，方便连续调参和补图。
-                </p>
+              <div className="hidden border-b border-stone-200 px-4 py-3 sm:block">
+                <h2 className="text-base font-semibold tracking-tight text-stone-950">图像输入</h2>
               </div>
               <div className="flex items-center justify-between gap-2 border-b border-stone-200 px-3 py-2 text-xs dark:border-slate-700">
                 <span className="text-stone-500 dark:text-slate-400">
@@ -1173,21 +1198,14 @@ export default function ImagePage() {
                   新建对话
                 </button>
               </div>
-              <div className="hide-scrollbar max-h-full overflow-y-auto p-2 sm:max-h-none sm:p-4">{composerPanel}</div>
+              <div className="p-2 sm:p-3">{composerPanel}</div>
             </div>
           </div>
         </div>
       </section>
 
-      {!isWideLayout && mobileHistoryOpen ? (
-        <div className="fixed inset-0 z-[90] xl:hidden">
-          <button
-            type="button"
-            className="absolute inset-0 bg-stone-950/28 backdrop-blur-[2px]"
-            onClick={() => setMobileHistoryOpen(false)}
-            aria-label="关闭历史记录"
-          />
-          <div className="absolute left-2 top-2 flex h-[calc(100dvh-1rem)] w-[min(90vw,360px)] flex-col overflow-hidden rounded-[24px] border border-white/70 bg-[#fbfaf7] shadow-[0_28px_90px_-36px_rgba(28,25,23,0.45)]">
+      {!isWideLayout ? (
+        <SideDrawer open={mobileHistoryOpen} onOpenChange={setMobileHistoryOpen} title="图片历史记录">
             <ImageSidebar
               conversations={threadSummaries}
               isLoadingHistory={isLoadingHistory}
@@ -1202,8 +1220,7 @@ export default function ImagePage() {
               onDeleteConversation={handleDeleteConversation}
               formatConversationTime={formatConversationTime}
             />
-          </div>
-        </div>
+        </SideDrawer>
       ) : null}
 
       <ImageLightbox

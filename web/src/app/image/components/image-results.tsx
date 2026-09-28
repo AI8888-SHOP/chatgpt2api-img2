@@ -41,20 +41,20 @@ export function ImageResults({
 
   if (!selectedConversation) {
     return (
-      <div className="flex min-h-0 items-center justify-center px-3 py-4 text-center sm:min-h-[420px] sm:px-4 sm:py-8">
+      <div className="flex min-h-0 items-center justify-center px-3 py-4 text-center sm:px-4 sm:py-8">
         <div className="max-w-3xl">
           <div className="inline-flex items-center gap-2 rounded-full border border-stone-200 bg-white px-4 py-1.5 text-[11px] font-medium text-stone-500 shadow-sm dark:border-cyan-100/10 dark:bg-slate-900/72 dark:text-slate-300">
             <Sparkles className="size-4" />
             Image Workspace
           </div>
-          <h1
-            className="mt-3 text-lg font-semibold tracking-tight text-stone-950 sm:mt-6 sm:text-5xl dark:text-slate-100"
+          <h2
+            className="mt-3 text-lg font-semibold tracking-tight text-stone-950 sm:mt-6 sm:text-3xl dark:text-slate-100"
             style={{ fontFamily: '"Iowan Old Style","Palatino Linotype","Book Antiqua",serif' }}
           >
-            先整理提示词，再沉淀一条可回看的图像会话。
-          </h1>
+            把想法变成图像
+          </h2>
           <p className="mx-auto mt-2 max-w-2xl text-sm leading-6 text-stone-500 sm:mt-4 sm:text-[15px] sm:leading-7 dark:text-slate-400">
-            左侧保留历史记录，右侧专注看当前结果。开发端优先验证工作台的节奏和可读性，再决定是否上线到 3020。
+            输入画面描述开始生成，或上传参考图进行编辑。完成的图片会保存在历史记录中。
           </p>
 
           <div className="mt-4 hidden gap-3 text-left sm:grid md:grid-cols-3">

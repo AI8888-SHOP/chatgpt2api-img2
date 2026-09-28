@@ -111,12 +111,13 @@ export function ImageComposer({
           className="hidden"
           onChange={(event) => {
             void onReferenceImageChange(Array.from(event.target.files || []));
+            event.target.value = "";
           }}
         />
       )}
 
       <div className="border-b border-white/55 px-3 py-2.5 sm:px-5 sm:py-3">
-        <div className="grid grid-cols-3 gap-1.5 sm:flex sm:flex-wrap sm:items-center sm:gap-2">
+        <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
           <ModeButton active={mode === "generate"} onClick={() => onModeChange("generate")}>文生图</ModeButton>
           <ModeButton active={mode === "edit"} onClick={() => onModeChange("edit")}>编辑图</ModeButton>
           <div className="rounded-full bg-white/70 px-2.5 py-2 text-center text-xs font-medium text-stone-600 sm:px-3 sm:text-left">
@@ -155,7 +156,8 @@ export function ImageComposer({
                         event.stopPropagation();
                         onOpenMaskEditor(index);
                       }}
-                      className="absolute -left-1 -top-1 inline-flex size-7 items-center justify-center rounded-full bg-amber-400 text-white opacity-0 shadow-sm transition group-hover:opacity-100 hover:bg-amber-500"
+                      className="absolute -left-1 -top-1 inline-flex size-7 items-center justify-center rounded-full bg-amber-400 text-white shadow-sm transition hover:bg-amber-500 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100"
+                      aria-label="遮罩编辑"
                       title="遮罩编辑"
                     >
                       <Pen className="size-3.5" />
@@ -167,7 +169,8 @@ export function ImageComposer({
                       event.stopPropagation();
                       onRemoveReferenceImage(index);
                     }}
-                    className="absolute -right-1 -top-1 inline-flex size-7 items-center justify-center rounded-full bg-white text-stone-500 opacity-0 shadow-sm transition group-hover:opacity-100 hover:text-stone-900"
+                    aria-label={`移除参考图 ${index + 1}`}
+                    className="absolute -right-1 -top-1 inline-flex size-7 items-center justify-center rounded-full bg-white text-stone-500 shadow-sm transition hover:text-stone-900 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100"
                   >
                     <X className="size-3.5" />
                   </button>
@@ -177,7 +180,7 @@ export function ImageComposer({
           </div>
         ) : null}
 
-        <div className="relative cursor-text rounded-[18px] border border-white/60 bg-white/60 p-2 sm:rounded-[28px] sm:p-3" onClick={() => textareaRef.current?.focus()}>
+        <div className="relative rounded-[18px] border border-white/60 bg-white/60 p-2 sm:rounded-[28px] sm:p-3">
           <ImageLightbox
             images={lightboxImages}
             currentIndex={lightboxIndex}
@@ -187,18 +190,19 @@ export function ImageComposer({
           />
 
           <Textarea
+            aria-label="图像提示词"
             ref={textareaRef}
             value={prompt}
             onChange={(event) => onPromptChange(event.target.value)}
             onPaste={handleTextareaPaste}
             placeholder={mode === "edit" ? "描述你希望如何修改这张参考图，也可以直接粘贴图片" : "输入你想要生成的画面、镜头、氛围、材质或风格"}
             onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey) {
+              if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) {
                 event.preventDefault();
-                void onSubmit();
+                if (!isOptimizingPrompt && prompt.trim() && (mode !== "edit" || referenceImages.length > 0)) void onSubmit();
               }
             }}
-            className="min-h-[72px] resize-none rounded-[16px] border-0 bg-transparent px-2.5 py-2 text-[14px] leading-6 text-stone-900 shadow-none placeholder:text-stone-400 focus-visible:ring-0 sm:min-h-[150px] sm:rounded-[24px] sm:px-3 sm:py-2.5 sm:leading-7"
+            className="min-h-[72px] resize-y rounded-[16px] border-0 bg-transparent px-2.5 py-2 text-[14px] leading-6 text-stone-900 shadow-none placeholder:text-stone-400 focus-visible:ring-0 sm:min-h-[100px] sm:rounded-[24px] sm:px-3 sm:py-2.5 sm:leading-7"
           />
 
           <div className="mt-2 flex flex-col gap-2 border-t border-stone-200/70 pt-2 sm:mt-3 sm:gap-3 sm:pt-3">
@@ -226,10 +230,13 @@ export function ImageComposer({
                   <span className="text-xs font-medium text-stone-600">张数</span>
                   <Input
                     type="number"
+                    aria-label="生成张数"
+                    step="1"
                     min="1"
                     max="10"
                     value={imageCount}
                     onChange={(event) => onImageCountChange(event.target.value)}
+                    onBlur={() => onImageCountChange(String(Math.max(1, Math.min(10, Math.trunc(Number(imageCount) || 1)))))}
                     className="h-7 w-[28px] border-0 bg-transparent px-0 text-center text-xs font-semibold text-stone-800 shadow-none focus-visible:ring-0 sm:w-[52px]"
                   />
                 </div>
@@ -238,27 +245,26 @@ export function ImageComposer({
                   <QuickPromptSelect prompts={quickPrompts} onSelect={onQuickPromptSelect} />
                 ) : null}
 
-                <div className="col-span-2 grid grid-cols-2 gap-1.5 sm:col-span-1 sm:flex sm:gap-2">
+                <div className="col-span-2 grid w-full min-w-0 grid-cols-2 gap-1.5 sm:gap-2">
                   <button
                     type="button"
                     onClick={() => void onOptimizePrompt()}
                     disabled={!prompt.trim() || isOptimizingPrompt}
-                    className="inline-flex h-9 w-full items-center justify-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-2.5 text-xs font-medium text-amber-900 shadow-none transition hover:bg-amber-100 disabled:cursor-not-allowed disabled:bg-stone-100 disabled:text-stone-400 sm:w-auto sm:gap-2 sm:px-4 sm:text-sm"
+                    aria-label="AI 优化提示词"
+                    className="inline-flex h-10 min-w-0 items-center justify-center gap-1 whitespace-nowrap rounded-full border border-amber-200 bg-amber-50 px-2 text-xs font-medium text-amber-900 shadow-none transition hover:bg-amber-100 disabled:cursor-not-allowed disabled:bg-stone-100 disabled:text-stone-400"
                   >
                     {isOptimizingPrompt ? <LoaderCircle className="size-3.5 animate-spin sm:size-4" /> : <Sparkles className="size-3.5 sm:size-4" />}
-                    <span className="sm:hidden">优化</span>
-                    <span className="hidden sm:inline">一键AI优化提示词</span>
+                    <span>AI 优化提示词</span>
                   </button>
 
                   <button
                     type="button"
                     onClick={() => void onSubmit()}
-                    disabled={!prompt.trim() || (mode === "edit" && referenceImages.length === 0)}
-                    className="inline-flex h-9 w-full items-center justify-center gap-1 rounded-full bg-stone-950 px-2.5 text-xs font-medium text-white shadow-[0_16px_28px_-18px_rgba(28,25,23,0.86)] transition hover:bg-stone-800 disabled:cursor-not-allowed disabled:bg-stone-300 sm:w-auto sm:gap-2 sm:px-5 sm:text-sm"
+                    disabled={isOptimizingPrompt || !prompt.trim() || (mode === "edit" && referenceImages.length === 0)}
+                    className="inline-flex h-10 min-w-0 items-center justify-center gap-1 whitespace-nowrap rounded-full bg-stone-950 px-2 text-xs font-medium text-white shadow-[0_16px_28px_-18px_rgba(28,25,23,0.86)] transition hover:bg-stone-800 disabled:cursor-not-allowed disabled:bg-stone-300"
                   >
                     <ArrowUp className="size-3.5 sm:size-4" />
-                    <span className="sm:hidden">生成</span>
-                    <span className="hidden sm:inline">开始生成</span>
+                    <span>开始生成</span>
                   </button>
                 </div>
               </div>

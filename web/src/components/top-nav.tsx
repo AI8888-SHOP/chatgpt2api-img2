@@ -6,6 +6,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
 
 import { DEFAULT_SITE_TITLE } from "@/components/app-title";
+import { SideDrawer } from "@/components/ui/side-drawer";
 import { getStoredThemeMode, setThemeMode, THEME_MODES, type ThemeMode } from "@/components/theme-controller";
 import { cn } from "@/lib/utils";
 import { clearStoredAuthKey } from "@/store/auth";
@@ -34,7 +35,7 @@ function isHiddenPath(pathname: string) {
 }
 
 export function TopNav() {
-  const pathname = usePathname();
+  const pathname = usePathname().replace(/\/+$/, "") || "/";
   const router = useRouter();
   const [menuOpen, setMenuOpen] = useState(false);
   const [siteTitle, setSiteTitle] = useState(DEFAULT_SITE_TITLE);
@@ -104,6 +105,7 @@ export function TopNav() {
                 className="inline-flex size-9 shrink-0 items-center justify-center rounded-xl border border-white/65 bg-white/65 text-stone-700 shadow-sm transition hover:border-stone-300 hover:bg-white hover:text-stone-950 sm:size-11 sm:rounded-2xl"
                 onClick={() => setMenuOpen(true)}
                 aria-label="打开菜单"
+                aria-expanded={menuOpen}
               >
                 <Menu className="size-4 sm:size-5" />
               </button>
@@ -175,15 +177,9 @@ export function TopNav() {
 
       </header>
 
-      {!isAdminArea && menuOpen ? (
-        <div className="fixed inset-0 z-[100]">
-          <button
-            type="button"
-            className="absolute inset-0 bg-stone-950/28 backdrop-blur-[2px]"
-            onClick={() => setMenuOpen(false)}
-            aria-label="关闭菜单"
-          />
-          <div className="absolute left-2 top-2 flex h-[calc(100dvh-1rem)] w-[min(82vw,320px)] flex-col overflow-hidden rounded-[24px] border border-white/70 bg-[#fbfaf7] shadow-[0_28px_90px_-36px_rgba(28,25,23,0.45)] sm:left-4 sm:top-4 sm:h-[calc(100dvh-2rem)] sm:w-[340px]">
+      {!isAdminArea ? (
+        <SideDrawer open={menuOpen} onOpenChange={setMenuOpen} title="工作台菜单">
+          <div className="flex h-full min-h-0 flex-col">
             <div className="flex items-center justify-between border-b border-stone-200 px-4 py-3">
               <div className="min-w-0">
                 <div className="text-[10px] font-semibold uppercase tracking-[0.2em] text-stone-500">Menu</div>
@@ -199,7 +195,9 @@ export function TopNav() {
               </button>
             </div>
 
-            <nav className="flex flex-1 flex-col gap-2 overflow-y-auto px-3 py-3">
+            <nav className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-3 py-3" onClick={(event) => {
+              if ((event.target as HTMLElement).closest("a")) setMenuOpen(false);
+            }}>
               <div className="xl:hidden">
                 <MenuAction icon={<History className="size-4" />} label="历史记录" active={pathname === "/image"} onClick={openImageHistory} />
               </div>
@@ -244,7 +242,7 @@ export function TopNav() {
               </button>
             </div>
           </div>
-        </div>
+        </SideDrawer>
       ) : null}
     </>
   );

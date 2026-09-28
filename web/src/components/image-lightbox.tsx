@@ -26,17 +26,18 @@ export function ImageLightbox({
   onOpenChange,
   onIndexChange,
 }: ImageLightboxProps) {
-  const current = images[currentIndex];
-  const hasPrev = currentIndex > 0;
-  const hasNext = currentIndex < images.length - 1;
+  const safeIndex = Math.max(0, Math.min(currentIndex, images.length - 1));
+  const current = images[safeIndex];
+  const hasPrev = safeIndex > 0;
+  const hasNext = safeIndex < images.length - 1;
 
   const goPrev = useCallback(() => {
-    if (hasPrev) onIndexChange(currentIndex - 1);
-  }, [hasPrev, currentIndex, onIndexChange]);
+    if (hasPrev) onIndexChange(safeIndex - 1);
+  }, [hasPrev, safeIndex, onIndexChange]);
 
   const goNext = useCallback(() => {
-    if (hasNext) onIndexChange(currentIndex + 1);
-  }, [hasNext, currentIndex, onIndexChange]);
+    if (hasNext) onIndexChange(safeIndex + 1);
+  }, [hasNext, safeIndex, onIndexChange]);
 
   useEffect(() => {
     if (!open) return;
@@ -68,9 +69,11 @@ export function ImageLightbox({
   return (
     <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}>
       <DialogPrimitive.Portal>
-        <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
+        <DialogPrimitive.Overlay className="fixed inset-0 z-[80] bg-black/80 backdrop-blur-sm data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
         <DialogPrimitive.Content
-          className="fixed inset-0 z-50 flex items-center justify-center outline-none"
+          aria-describedby={undefined}
+          className="fixed inset-0 z-[80] flex items-center justify-center outline-none"
+          onClick={(event) => { if (event.target === event.currentTarget) onOpenChange(false); }}
           onPointerDownOutside={(e) => e.preventDefault()}
         >
           <DialogPrimitive.Title className="sr-only">
@@ -81,7 +84,7 @@ export function ImageLightbox({
           <div className="absolute top-4 right-4 z-10 flex items-center gap-2">
             {images.length > 1 && (
               <span className="rounded-full bg-black/50 px-3 py-1.5 text-xs font-medium text-white/90">
-                {currentIndex + 1} / {images.length}
+                {safeIndex + 1} / {images.length}
               </span>
             )}
             <button

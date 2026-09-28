@@ -43,12 +43,12 @@ export function ImageSidebar({
   return (
     <aside
       className={cn(
-        "overflow-hidden rounded-[24px] border border-stone-200 bg-[#f8f8f7] shadow-[0_8px_30px_rgba(15,23,42,0.04)] transition-[width] duration-200 sm:rounded-[28px] dark:border-slate-700/75 dark:bg-slate-900/64 dark:shadow-[0_18px_60px_rgba(0,0,0,0.22)]",
+        "h-full min-h-0 overflow-hidden rounded-[24px] border border-stone-200 bg-[#f8f8f7] shadow-[0_8px_30px_rgba(15,23,42,0.04)] transition-[width] duration-200 sm:rounded-[28px] dark:border-slate-700/75 dark:bg-slate-900/64 dark:shadow-[0_18px_60px_rgba(0,0,0,0.22)]",
         collapsed ? "w-full xl:w-[92px]" : "w-full",
       )}
     >
       <div className="flex h-full min-h-0 flex-col">
-        <div className="border-b border-stone-200/80 px-3 py-3 sm:px-4 sm:py-4 dark:border-slate-700/70">
+        <div className="shrink-0 border-b border-stone-200/80 px-3 py-3 sm:px-4 sm:py-4 dark:border-slate-700/70">
           <div className={cn("gap-3", collapsed ? "flex items-center justify-between xl:flex-col xl:items-center" : "flex items-start justify-between")}>
             <div className={cn(collapsed ? "flex min-w-0 items-center gap-3 xl:flex-col xl:items-center xl:gap-2" : "min-w-0") }>
               <div className="flex size-11 items-center justify-center rounded-2xl bg-white shadow-sm dark:bg-slate-800/78">
@@ -72,6 +72,7 @@ export function ImageSidebar({
               className="inline-flex size-10 items-center justify-center rounded-2xl border border-stone-200 bg-white text-stone-600 transition hover:bg-stone-50 hover:text-stone-900 dark:border-slate-700/75 dark:bg-slate-800/78 dark:text-slate-300 dark:hover:bg-slate-700 dark:hover:text-slate-100"
               onClick={onToggleCollapsed}
               aria-label={collapsed ? "展开历史记录" : "收起历史记录"}
+              aria-expanded={!collapsed}
             >
               {collapsed ? <PanelLeftOpen className="size-4" /> : <PanelLeftClose className="size-4" />}
             </button>
@@ -112,11 +113,13 @@ export function ImageSidebar({
                         type="button"
                         onClick={() => onSelectConversation(conversation.id)}
                         className={cn(collapsed ? "flex w-full flex-col items-center gap-1 text-center" : "flex min-w-0 flex-1 items-center gap-3 text-left")}
-                        title={collapsed ? conversation.title : undefined}
+                        title={conversation.title || "未命名对话"}
+                        aria-label={conversation.title || "未命名对话"}
+                        aria-current={active ? "true" : undefined}
                       >
                         <div className={cn("flex shrink-0 items-center justify-center overflow-hidden rounded-2xl bg-stone-100 dark:bg-slate-700/80", collapsed ? "size-14" : "size-14")}>
                           {previewSrc ? (
-                            <img src={previewSrc} alt={conversation.title} className="h-full w-full object-cover" />
+                            <img src={previewSrc} alt="" loading="lazy" className="h-full w-full object-cover" />
                           ) : (
                             <History className="size-4 text-stone-400 dark:text-slate-400" />
                           )}
@@ -150,7 +153,7 @@ export function ImageSidebar({
                         <button
                           type="button"
                           onClick={() => void onDeleteConversation(conversation.id)}
-                          className="inline-flex size-8 shrink-0 items-center justify-center rounded-xl text-stone-400 opacity-100 transition hover:bg-stone-100 hover:text-rose-500 lg:opacity-0 lg:group-hover:opacity-100 dark:text-slate-500 dark:hover:bg-slate-700 dark:hover:text-rose-300"
+                          className="inline-flex size-8 shrink-0 items-center justify-center rounded-xl text-stone-400 opacity-100 transition hover:bg-stone-100 hover:text-rose-500 lg:opacity-0 lg:group-hover:opacity-100 lg:group-focus-within:opacity-100 dark:text-slate-500 dark:hover:bg-slate-700 dark:hover:text-rose-300"
                           aria-label="删除会话"
                         >
                           <Trash2 className="size-4" />

@@ -213,7 +213,7 @@
   background-color: rgba(41, 50, 64, 0.9) !important;
 }
 
-.dark [class*="bg-stone-950"],
+.dark [class~="bg-stone-950"]:not(:disabled),
 .dark [class*="hover:bg-stone-800"]:hover {
   background-color: rgba(50, 211, 194, 0.92) !important;
   color: rgb(9, 24, 28) !important;
@@ -254,4 +254,20 @@
 
 .dark iframe {
   color-scheme: light;
+}
+
+/* Keep disabled actions and modal scrims distinct from accent buttons. */
+.dark button:disabled {
+  background-color: #293240 !important;
+  color: #82919e !important;
+}
+
+.dark [data-sonner-toast] {
+  background: #1f2632 !important;
+  border-color: #42515e !important;
+  color: #e8eef2 !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
 }
