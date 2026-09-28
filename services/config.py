@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import time
 from typing import Any
+from services.prompt_optimizer_config import PromptOptimizerSettings, merge_optimizer_settings
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = BASE_DIR / "data"
@@ -433,6 +434,7 @@ class ConfigStore:
         data["log_levels"] = self.log_levels
         data["sensitive_words"] = self.sensitive_words
         data["ai_review"] = self.ai_review
+        data["prompt_optimizer"] = self.get_prompt_optimizer_settings().public_dict()
         data["global_system_prompt"] = self.global_system_prompt
         data["image_storage"] = self.get_image_storage_settings()
         data["chat_completion_cache"] = self.get_chat_completion_cache_settings()
@@ -512,7 +514,17 @@ class ConfigStore:
         return _normalize_chat_completion_cache_settings(self.data.get("chat_completion_cache"))
 
     def update(self, data: dict[str, object]) -> dict[str, object]:
-        self.data = dict(data or {})
+        previous_data = self.data
+        next_data = dict(data or {})
+        previous_optimizer = self.data.get("prompt_optimizer") or {}
+        if "prompt_optimizer" in next_data:
+            try:
+                next_data["prompt_optimizer"] = merge_optimizer_settings(next_data["prompt_optimizer"], previous_optimizer)
+            except (ValueError, TypeError):
+                raise ValueError("提示词优化配置无效，请检查 API 地址、密钥、模型和限额范围") from None
+        elif previous_optimizer:
+            next_data["prompt_optimizer"] = previous_optimizer
+        self.data = next_data
         if "image_storage" in self.data:
             self.data["image_storage"] = _normalize_image_storage_settings(self.data.get("image_storage"))
         if "chat_completion_cache" in self.data:
@@ -526,8 +538,15 @@ class ConfigStore:
                     incoming_runtime["_existing_cf_cookies"] = previous_clearance.get("cf_cookies")
                     incoming_runtime["_existing_cf_clearance"] = previous_clearance.get("cf_clearance")
             self.data["proxy_runtime"] = _normalize_proxy_runtime_settings(incoming_runtime)
-        self._save()
+        try:
+            self._save()
+        except ConfigSaveError:
+            self.data = previous_data
+            raise
         return self.get()
+
+    def get_prompt_optimizer_settings(self) -> PromptOptimizerSettings:
+        return PromptOptimizerSettings.model_validate(self.data.get("prompt_optimizer") or {})
 
 
 config = ConfigStore(CONFIG_FILE)

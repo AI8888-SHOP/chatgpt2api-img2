@@ -49,6 +49,7 @@ type AccountUpdateResponse = {
 };
 
 export type SettingsConfig = {
+  prompt_optimizer?: PromptOptimizerConfig;
   site_title?: string;
   proxy: string;
   image_upstreams?: ImageUpstreamConfig[];
@@ -79,6 +80,30 @@ export type PublicAppConfig = {
   site_title: string;
   quick_prompts?: QuickPromptConfig[];
   psd_task_price?: number;
+};
+
+export type PromptOptimizerConfig = {
+  enabled: boolean;
+  base_url: string;
+  api_key: string;
+  has_api_key?: boolean;
+  clear_api_key?: boolean;
+  model: string;
+  token_parameter: "max_completion_tokens" | "max_tokens";
+  tokenizer: "cl100k_base" | "o200k_base";
+  max_input_tokens: number;
+  max_output_tokens: number;
+  user_rpm: number;
+  user_daily_requests: number;
+  user_daily_tokens: number;
+  user_concurrency: number;
+  global_rpm: number;
+  global_daily_requests: number;
+  global_daily_tokens: number;
+  global_concurrency: number;
+  timeout_seconds: number;
+  min_quota: number;
+  min_account_age_seconds: number;
 };
 
 export type QuickPromptConfig = {
@@ -614,10 +639,10 @@ export async function createImageGenerationJob(
   });
 }
 
-export async function optimizeImagePrompt(prompt: string, model: string = "auto") {
-  return httpRequest<{ optimized_prompt: string }>("/v1/image-prompts/optimize", {
+export async function optimizeImagePrompt(prompt: string) {
+  return httpRequest<{ optimized_prompt: string; truncated?: boolean }>("/v1/image-prompts/optimize", {
     method: "POST",
-    body: { prompt, model },
+    body: { prompt },
     authScope: "user",
   });
 }

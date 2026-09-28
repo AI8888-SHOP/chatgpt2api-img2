@@ -27,6 +27,9 @@ import { cn } from "@/lib/utils";
 import {
   deleteImageConversation,
   getStoredImageSrc,
+  getImageThreadId,
+  getImageThreadTurns,
+  getImageThreadSummaries,
   listImageConversations,
   saveImageConversation,
   type ImageConversation,
@@ -234,6 +237,7 @@ export default function ImagePage() {
   const pendingHistoryScrollRef = useRef(false);
   const resumingConversationIdsRef = useRef<Set<string>>(new Set());
   const mountedRef = useRef(true);
+  const resultsEndRef = useRef<HTMLDivElement>(null);
 
   const [imagePrompt, setImagePrompt] = useState("");
   const [imageCount, setImageCount] = useState("1");
@@ -248,6 +252,7 @@ export default function ImagePage() {
   const [referenceImages, setReferenceImages] = useState<StoredReferenceImage[]>([]);
   const [conversations, setConversations] = useState<ImageConversation[]>([]);
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
+  const [continuingThreadId, setContinuingThreadId] = useState<string | null>(null);
   const [isLoadingHistory, setIsLoadingHistory] = useState(true);
   const [generatingIds, setGeneratingIds] = useState<Set<string>>(new Set());
   const [availableQuota, setAvailableQuota] = useState("加载中");
@@ -261,13 +266,21 @@ export default function ImagePage() {
   const [isOptimizingPrompt, setIsOptimizingPrompt] = useState(false);
   const [quickPrompts, setQuickPrompts] = useState<QuickPromptConfig[]>([]);
 
-  const selectedConversation = useMemo(
-    () => conversations.find((item) => item.id === selectedConversationId) ?? null,
+  const selectedTurns = useMemo(
+    () => selectedConversationId ? getImageThreadTurns(conversations, selectedConversationId) : [],
     [conversations, selectedConversationId],
   );
+  const threadSummaries = useMemo(() => getImageThreadSummaries(conversations), [conversations]);
+  const generatingThreadIds = useMemo(() => new Set(
+    conversations.filter((item) => generatingIds.has(item.id)).map(getImageThreadId),
+  ), [conversations, generatingIds]);
+  const selectedConversation = selectedTurns[selectedTurns.length - 1] ?? null;
   const parsedCount = useMemo(() => Math.max(1, Math.min(10, Number(imageCount) || 1)), [imageCount]);
-  const isSelectedGenerating = selectedConversationId !== null && generatingIds.has(selectedConversationId);
   const hasAnyGenerating = generatingIds.size > 0;
+
+  useEffect(() => {
+    resultsEndRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, [selectedConversationId, selectedTurns.length]);
 
   useEffect(() => {
     conversationsRef.current = conversations;
@@ -326,10 +339,10 @@ export default function ImagePage() {
 
   const lightboxImages = useMemo(
     () =>
-      (selectedConversation?.images ?? [])
+      selectedTurns.flatMap((turn) => turn.images)
         .map((img) => ({ id: img.id, src: getStoredImageSrc(img) }))
         .filter((img): img is { id: string; src: string } => !!img.src),
-    [selectedConversation],
+    [selectedTurns],
   );
 
   const openLightbox = useCallback(
@@ -582,13 +595,37 @@ export default function ImagePage() {
     setImageCount("1");
   }, []);
 
+  const handleNewConversation = useCallback(() => {
+    setContinuingThreadId(null);
+    setSelectedConversationId(null);
+    resetComposer();
+    setImageMode("generate");
+    setMaskEditorImage(null);
+    setMaskEditorIndex(-1);
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  }, [resetComposer]);
+
+  const handleSelectConversation = useCallback((id: string) => {
+    setSelectedConversationId(id);
+    setContinuingThreadId(id);
+    resetComposer();
+    setImageMode("generate");
+    setMaskEditorImage(null);
+    setMaskEditorIndex(-1);
+  }, [resetComposer]);
+
   const applyReferenceImagesToComposer = useCallback((images: StoredReferenceImage[]) => {
-    setReferenceImages(images);
-    setReferenceImageFiles(images.map(referenceImageToFile));
+    const available = images.filter((image) => image.dataUrl?.startsWith("data:image/"));
+    setReferenceImages(available);
+    setReferenceImageFiles(available.map(referenceImageToFile));
+    if (available.length !== images.length) toast.info("部分参考图未保存在此设备，请重新上传后继续");
   }, []);
 
   const handleReuseConversation = useCallback(
     (conversation: ImageConversation) => {
+      const threadId = getImageThreadId(conversation);
+      setSelectedConversationId(threadId);
+      setContinuingThreadId(threadId);
       const mode = conversation.mode === "edit" ? "edit" : "generate";
       setImagePrompt(conversation.prompt);
       setImageMode(mode);
@@ -600,28 +637,33 @@ export default function ImagePage() {
       setImageOutputCompression(conversation.generationSettings?.outputCompression ?? 0);
       setImageModeration(conversation.generationSettings?.moderation || "auto");
       applyReferenceImagesToComposer(mode === "edit" ? [...(conversation.referenceImages || [])] : []);
-      toast.success("已复用到输入面板");
+      toast.success("已复用输入，提交后将在原对话中继续");
       requestAnimationFrame(() => textareaRef.current?.focus());
     },
     [applyReferenceImagesToComposer],
   );
 
   const handleUseResultAsReference = useCallback(
-    async (image: StoredImage, index: number) => {
+    async (image: StoredImage, index: number, sourceConversation: ImageConversation | null = selectedConversation) => {
       const src = getStoredImageSrc(image);
       if (!src) return;
       try {
         const referenceImage = await resultImageToReference(src, index);
+        if (sourceConversation) {
+          const threadId = getImageThreadId(sourceConversation);
+          setSelectedConversationId(threadId);
+          setContinuingThreadId(threadId);
+        }
         setImageMode("edit");
         applyReferenceImagesToComposer([referenceImage]);
-        setImagePrompt(selectedConversation?.prompt || "");
-        setImageModel(normalizeImageModel(selectedConversation?.model));
+        setImagePrompt(sourceConversation?.prompt || "");
+        setImageModel(normalizeImageModel(sourceConversation?.model));
         setImageCount("1");
-        setImageQuality(selectedConversation?.generationSettings?.quality || "auto");
-        setImageSize(selectedConversation?.generationSettings?.size || "auto");
-        setImageOutputFormat(selectedConversation?.generationSettings?.outputFormat || "png");
-        setImageOutputCompression(selectedConversation?.generationSettings?.outputCompression ?? 0);
-        setImageModeration(selectedConversation?.generationSettings?.moderation || "auto");
+        setImageQuality(sourceConversation?.generationSettings?.quality || "auto");
+        setImageSize(sourceConversation?.generationSettings?.size || "auto");
+        setImageOutputFormat(sourceConversation?.generationSettings?.outputFormat || "png");
+        setImageOutputCompression(sourceConversation?.generationSettings?.outputCompression ?? 0);
+        setImageModeration(sourceConversation?.generationSettings?.moderation || "auto");
         toast.success("已作为参考图放入编辑模式");
         requestAnimationFrame(() => textareaRef.current?.focus());
       } catch (error) {
@@ -650,11 +692,17 @@ export default function ImagePage() {
 
   const handleDeleteConversation = useCallback(
     async (id: string) => {
-      await deleteImageConversation(id);
-      setConversations((prev) => prev.filter((item) => item.id !== id));
-      if (selectedConversationId === id) setSelectedConversationId(null);
+      const turns = getImageThreadTurns(conversationsRef.current, id);
+      if (turns.some((turn) => generatingIds.has(turn.id) || conversationHasRunnableImage(turn))) {
+        toast.info("请等待本对话的生成任务完成后再删除");
+        return;
+      }
+      for (const turn of turns) await deleteImageConversation(turn.id);
+      conversationsRef.current = conversationsRef.current.filter((item) => getImageThreadId(item) !== id);
+      setConversations((prev) => prev.filter((item) => getImageThreadId(item) !== id));
+      if (selectedConversationId === id) handleNewConversation();
     },
-    [selectedConversationId],
+    [selectedConversationId, generatingIds, handleNewConversation],
   );
 
   const handleResumeImageJob = useCallback(
@@ -805,6 +853,7 @@ export default function ImagePage() {
     }
 
     const conversationId = createId();
+    const threadId = continuingThreadId || conversationId;
     const now = new Date().toISOString();
     const draftReferenceImages: StoredReferenceImage[] = [...referenceImages];
     const title = buildConversationTitle(prompt);
@@ -819,6 +868,7 @@ export default function ImagePage() {
 
     const draftConversation: ImageConversation = {
       id: conversationId,
+      threadId,
       title,
       prompt,
       model: requestModel,
@@ -838,7 +888,8 @@ export default function ImagePage() {
     };
 
     addGeneratingId(conversationId);
-    setSelectedConversationId(conversationId);
+    setSelectedConversationId(threadId);
+    setContinuingThreadId(threadId);
     resetComposer();
 
     try {
@@ -933,6 +984,7 @@ export default function ImagePage() {
     }
   }, [
     imagePrompt,
+    continuingThreadId,
     imageMode,
     referenceImageFiles,
     referenceImages,
@@ -966,7 +1018,8 @@ export default function ImagePage() {
         throw new Error("优化失败");
       }
       setImagePrompt(optimizedPrompt);
-      toast.success("提示词已优化");
+      if (result.truncated) toast.info("提示词已优化，输出已按长度上限截取");
+      else toast.success("提示词已优化");
       requestAnimationFrame(() => textareaRef.current?.focus());
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "优化提示词失败");
@@ -985,17 +1038,29 @@ export default function ImagePage() {
     requestAnimationFrame(() => textareaRef.current?.focus());
   }, []);
 
-  const resultsPanel = (
+  const renderTurn = (turn: ImageConversation | null) => (
     <ImageResults
-      selectedConversation={selectedConversation}
-      isSelectedGenerating={isSelectedGenerating}
+      selectedConversation={turn}
+      isSelectedGenerating={turn !== null && generatingIds.has(turn.id)}
       openLightbox={openLightbox}
       onReuseConversation={handleReuseConversation}
-      onUseResultAsReference={handleUseResultAsReference}
+      onUseResultAsReference={(image, index) => handleUseResultAsReference(image, index, turn)}
       onSplitAsPsd={handleSplitResultAsPsd}
       onResumeImageJob={handleResumeImageJob}
       formatConversationTime={formatConversationTime}
     />
+  );
+
+  const resultsPanel = (
+    <div className="space-y-8">
+      {selectedTurns.length ? selectedTurns.map((turn, index) => (
+        <div key={turn.id} className="space-y-4">
+          <div className="text-center text-xs text-stone-500 dark:text-slate-400">第 {index + 1} 轮</div>
+          {renderTurn(turn)}
+        </div>
+      )) : renderTurn(null)}
+      <div ref={resultsEndRef} />
+    </div>
   );
 
   const composerPanel = (
@@ -1047,9 +1112,9 @@ export default function ImagePage() {
         <div ref={historyPanelRef} className="order-1 hidden min-h-0 xl:order-1 xl:block">
           <div className="hide-scrollbar max-h-[22dvh] overflow-y-auto xl:h-full xl:max-h-none xl:pr-1">
             <ImageSidebar
-              conversations={conversations}
+              conversations={threadSummaries}
               isLoadingHistory={isLoadingHistory}
-              generatingIds={generatingIds}
+              generatingIds={generatingThreadIds}
               selectedConversationId={selectedConversationId}
               collapsed={isWideLayout ? historyCollapsed : !mobileHistoryOpen}
               onToggleCollapsed={() => {
@@ -1059,7 +1124,7 @@ export default function ImagePage() {
                   setMobileHistoryOpen((prev) => !prev);
                 }
               }}
-              onSelectConversation={setSelectedConversationId}
+              onSelectConversation={handleSelectConversation}
               onDeleteConversation={handleDeleteConversation}
               formatConversationTime={formatConversationTime}
             />
@@ -1073,11 +1138,11 @@ export default function ImagePage() {
                 <div className="hidden text-[10px] font-semibold uppercase tracking-[0.22em] text-stone-500 sm:block">Workspace</div>
                 <h1 className="text-base font-semibold tracking-tight text-stone-950 sm:mt-1 sm:text-xl">结果会话</h1>
                 <p className="mt-2 hidden max-w-2xl text-sm leading-6 text-stone-500 sm:block">
-                  中间这列只负责查看当前会话，保留更明显的“提问一次，回图一次”的阅读节奏。
+                  同一对话按轮次保留提示词和图片，可复用任一轮输入继续生成。
                 </p>
               </div>
               <div className="hidden flex-wrap items-center gap-2 text-xs font-medium text-stone-500 sm:flex">
-                <span className="rounded-full bg-white px-3 py-1.5 shadow-sm">会话 {conversations.length}</span>
+                <span className="rounded-full bg-white px-3 py-1.5 shadow-sm">会话 {threadSummaries.length}</span>
                 <span className="rounded-full bg-white px-3 py-1.5 shadow-sm">运行中 {generatingIds.size}</span>
                 <span className="rounded-full bg-white px-3 py-1.5 shadow-sm">积分 {availableQuota}</span>
                 <span className="rounded-full bg-white px-3 py-1.5 shadow-sm">每张图消耗 1 积分</span>
@@ -1100,6 +1165,14 @@ export default function ImagePage() {
                   输入器保持单独一列，避免和结果阅读区混在一起，方便连续调参和补图。
                 </p>
               </div>
+              <div className="flex items-center justify-between gap-2 border-b border-stone-200 px-3 py-2 text-xs dark:border-slate-700">
+                <span className="text-stone-500 dark:text-slate-400">
+                  {continuingThreadId ? `继续当前对话 · 已有 ${selectedTurns.length} 轮` : "新对话"}
+                </span>
+                <button type="button" onClick={handleNewConversation} className="rounded-full border border-stone-300 px-3 py-1.5 dark:border-slate-600">
+                  新建对话
+                </button>
+              </div>
               <div className="hide-scrollbar max-h-full overflow-y-auto p-2 sm:max-h-none sm:p-4">{composerPanel}</div>
             </div>
           </div>
@@ -1116,14 +1189,14 @@ export default function ImagePage() {
           />
           <div className="absolute left-2 top-2 flex h-[calc(100dvh-1rem)] w-[min(90vw,360px)] flex-col overflow-hidden rounded-[24px] border border-white/70 bg-[#fbfaf7] shadow-[0_28px_90px_-36px_rgba(28,25,23,0.45)]">
             <ImageSidebar
-              conversations={conversations}
+              conversations={threadSummaries}
               isLoadingHistory={isLoadingHistory}
-              generatingIds={generatingIds}
+              generatingIds={generatingThreadIds}
               selectedConversationId={selectedConversationId}
               collapsed={false}
               onToggleCollapsed={() => setMobileHistoryOpen(false)}
               onSelectConversation={(id) => {
-                setSelectedConversationId(id);
+                handleSelectConversation(id);
                 setMobileHistoryOpen(false);
               }}
               onDeleteConversation={handleDeleteConversation}

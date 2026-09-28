@@ -26,6 +26,9 @@ from services.account_service import account_service
 from services.api_key_service import api_key_service
 from services.chatgpt_service import ChatGPTService
 from services.config import ConfigSaveError, DATA_DIR, config
+from services.prompt_optimizer_service import (
+    OptimizerLimits, PromptOptimizerService, read_optimizer_request, require_optimizer_session,
+)
 from services.content_filter import check_request
 from services.cpa_service import cpa_config, cpa_import_service, list_remote_files
 from services.editable_file_task_service import editable_file_task_service
@@ -122,11 +125,6 @@ class EditableFileTaskRequest(BaseModel):
     prompt: str = ""
     base64_images: list[str] = Field(default_factory=list)
     client_task_id: str | None = None
-
-
-class PromptOptimizeRequest(BaseModel):
-    prompt: str = Field(..., min_length=1)
-    model: str = "auto"
 
 
 class ImageJobResumeRequest(BaseModel):
@@ -877,6 +875,7 @@ def create_app() -> FastAPI:
     app.mount("/generated-images", StaticFiles(directory=GENERATED_IMAGES_DIR), name="generated-images")
     app.mount("/images", StaticFiles(directory=config.images_dir), name="images")
     router = APIRouter()
+    prompt_optimizer = PromptOptimizerService(OptimizerLimits(DATA_DIR / "prompt_optimizer_limits.db"))
 
     @router.get("/v1/models")
     async def list_models(authorization: str | None = Header(default=None)):
@@ -1116,6 +1115,8 @@ def create_app() -> FastAPI:
             return {"config": config.update(body.model_dump(mode="python"))}
         except ConfigSaveError as exc:
             raise HTTPException(status_code=500, detail={"error": str(exc)}) from exc
+        except ValueError:
+            raise HTTPException(status_code=400, detail={"error": "提示词优化配置无效，请检查地址、密钥、模型和限额范围"}) from None
 
     @router.get("/api/accounts")
     async def get_accounts(authorization: str | None = Header(default=None)):
@@ -1978,13 +1979,16 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
 
     @router.post("/v1/image-prompts/optimize")
-    async def optimize_image_prompt(body: PromptOptimizeRequest, authorization: str | None = Header(default=None)):
+    async def optimize_image_prompt(request: Request, authorization: str | None = Header(default=None)):
         start_time = datetime.now().timestamp()
+        require_optimizer_session(extract_bearer_token(authorization))
         _, api_key = require_user(authorization)
+        body = await read_optimizer_request(request)
         prompt = str(body.prompt or "").strip()
-        model = str(body.model or "auto").strip() or "auto"
+        settings = config.get_prompt_optimizer_settings()
+        model = settings.model
         try:
-            result = await run_in_threadpool(chatgpt_service.optimize_prompt, prompt, model)
+            result = await prompt_optimizer.optimize(api_key, prompt, settings)
             log_user_usage(
                 api_key,
                 action="image_prompt_optimize",
@@ -1993,8 +1997,11 @@ def create_app() -> FastAPI:
                 status="success",
                 started_at=start_time,
             )
-            return {"optimized_prompt": result}
-        except Exception as exc:
+            return result
+        except HTTPException as exc:
+            if exc.status_code == 429:
+                # Admission is already enforced in SQLite; avoid log writes per rejected request.
+                raise
             log_user_usage(
                 api_key,
                 action="image_prompt_optimize",
@@ -2002,9 +2009,9 @@ def create_app() -> FastAPI:
                 model=model,
                 status="failed",
                 started_at=start_time,
-                error=str(exc),
+                error=str(exc.detail),
             )
-            raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
+            raise
 
     # ── CPA multi-pool endpoints ────────────────────────────────────
 

@@ -116,7 +116,7 @@ export function ImageResults({
               className="inline-flex h-9 items-center justify-center gap-2 rounded-full bg-stone-950 px-4 text-xs font-medium text-white shadow-[0_16px_28px_-18px_rgba(28,25,23,0.8)] transition hover:bg-stone-800 dark:bg-cyan-300 dark:text-slate-950 dark:hover:bg-cyan-200"
             >
               <RotateCcw className="size-3.5" />
-              复用输入
+              复用并继续对话
             </button>
 
             <div className="flex flex-wrap justify-end gap-1.5 text-xs font-medium text-stone-500 sm:gap-2">
@@ -190,7 +190,7 @@ export function ImageResults({
 
       <section className="flex justify-start">
         <div className="rounded-full bg-stone-100 px-3 py-1.5 text-[11px] font-medium text-stone-500 dark:bg-slate-800/80 dark:text-slate-400">
-          会话结束于 {formatConversationTime(selectedConversation.createdAt)}
+          本轮创建于 {formatConversationTime(selectedConversation.createdAt)}
         </div>
       </section>
     </div>

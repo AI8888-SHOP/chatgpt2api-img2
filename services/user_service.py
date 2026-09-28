@@ -1218,6 +1218,11 @@ class UserService:
         }
         if conversation.get("error"):
             sanitized["error"] = str(conversation.get("error") or "")[:1000]
+        thread_id = str(conversation.get("threadId") or "").strip()
+        if thread_id:
+            if len(thread_id) > 128:
+                raise ValueError("conversation thread id is too long")
+            sanitized["threadId"] = thread_id
 
         settings = conversation.get("generationSettings")
         if isinstance(settings, dict):

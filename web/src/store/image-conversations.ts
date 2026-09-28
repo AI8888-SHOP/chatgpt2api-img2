@@ -37,6 +37,7 @@ export type ImageConversationStatus = "generating" | "success" | "error";
 
 export type ImageConversation = {
   id: string;
+  threadId?: string;
   title: string;
   prompt: string;
   model: ImageModel;
@@ -49,6 +50,30 @@ export type ImageConversation = {
   status: ImageConversationStatus;
   error?: string;
 };
+
+export function getImageThreadId(conversation: ImageConversation): string {
+  return conversation.threadId || conversation.id;
+}
+
+export function getImageThreadTurns(conversations: ImageConversation[], threadId: string): ImageConversation[] {
+  return conversations
+    .filter((conversation) => getImageThreadId(conversation) === threadId)
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
+}
+
+export function getImageThreadSummaries(conversations: ImageConversation[]): ImageConversation[] {
+  const groups = new Map<string, ImageConversation[]>();
+  for (const conversation of conversations) {
+    const id = getImageThreadId(conversation);
+    groups.set(id, [...(groups.get(id) || []), conversation]);
+  }
+  return Array.from(groups, ([id, turns]) => {
+    turns.sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
+    const first = turns[0];
+    const latest = turns[turns.length - 1];
+    return { ...latest, id, threadId: id, title: first.title };
+  }).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
 
 const imageConversationStorage = localforage.createInstance({
   name: "chatgpt2api",
