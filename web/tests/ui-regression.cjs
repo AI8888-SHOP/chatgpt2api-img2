@@ -138,6 +138,8 @@ function check(name, ok, detail) {
           await page.getByRole('button', { name: '移除参考图 1', exact: true }).waitFor();
           await page.getByRole('combobox').filter({ hasText: 'PNG' }).click();
           await page.getByRole('option', { name: 'WEBP', exact: true }).click();
+          // React can commit the selected label after the click promise resolves.
+          await page.getByRole('combobox').filter({ hasText: 'webp' }).waitFor({ state: 'visible' });
           check('format-select-keeps-focus', await page.getByRole('combobox').filter({ hasText: 'webp' }).count() === 1);
         }
       }
