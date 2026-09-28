@@ -46,7 +46,7 @@ RUN uv sync --frozen --no-dev --no-install-project
 
 COPY main.py ./
 COPY admin ./admin
-COPY config.json ./
+COPY config.example.json ./config.json
 COPY VERSION ./
 COPY services ./services
 COPY utils ./utils
