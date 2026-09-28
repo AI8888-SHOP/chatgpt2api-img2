@@ -1,0 +1,30 @@
+{
+  "name": "codex-register",
+  "version": "1.3.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "dev:sign": "tsx src/index.ts --sign",
+    "dev:at": "tsx src/index.ts --at",
+    "build": "tsup --config tsup.config.ts",
+    "start": "node bundle/index.cjs",
+    "start:sign": "node bundle/index.cjs --sign",
+    "start:at": "node bundle/index.cjs --at",
+    "batch": "node bundle/batch-register.cjs"
+  },
+  "dependencies": {
+    "fetch-cookie": "^3.1.0",
+    "imapflow": "^1.4.7",
+    "playwright-core": "^1.59.1",
+    "socks": "^2.8.7",
+    "tough-cookie": "^5.1.1",
+    "undici": "^7.16.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "tsup": "^8.5.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.9.2"
+  }
+}

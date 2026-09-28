@@ -1,0 +1,333 @@
+from __future__ import annotations
+
+import time
+import uuid
+from typing import Any, Iterable, Iterator
+
+from fastapi import HTTPException
+
+from services.gptfree_response_service import gptfree_response_service, is_gptfree_request_model
+from services.protocol.chat_completion_cache import cache_key, chat_completion_cache, normalize_text_messages
+from services.protocol.conversation import (
+    ConversationRequest,
+    ImageOutput,
+    collect_image_outputs,
+    collect_text,
+    count_message_image_tokens,
+    count_message_text_tokens,
+    count_text_tokens,
+    encode_images,
+    normalize_messages,
+    stream_image_outputs_with_pool,
+    stream_text_deltas,
+    text_backend,
+)
+from utils.helper import build_chat_image_markdown_content, extract_chat_image, extract_chat_prompt, is_image_chat_request, parse_image_count
+from utils.image_tokens import (
+    chat_usage_from_image_usage,
+    count_image_inputs_tokens,
+    count_image_output_items_tokens,
+    image_usage,
+)
+
+TOOL_UNAVAILABLE_SYSTEM_MESSAGE = (
+    "This compatibility backend cannot execute local tools, shell commands, web searches, "
+    "or file operations. Do not claim to have run tools or inspected external resources. "
+    "If a user asks you to use a tool, say that tool execution is unavailable through this backend."
+)
+
+
+def completion_chunk(model: str, delta: dict[str, Any], finish_reason: str | None = None, completion_id: str = "", created: int | None = None) -> dict[str, Any]:
+    return {
+        "id": completion_id or f"chatcmpl-{uuid.uuid4().hex}",
+        "object": "chat.completion.chunk",
+        "created": created or int(time.time()),
+        "model": model,
+        "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+    }
+
+
+def completion_response(
+    model: str,
+    content: str,
+    created: int | None = None,
+    messages: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    prompt_text_tokens = count_message_text_tokens(messages, model) if messages else 0
+    prompt_image_tokens = count_message_image_tokens(messages, model) if messages else 0
+    prompt_tokens = prompt_text_tokens + prompt_image_tokens
+    completion_tokens = count_text_tokens(content, model) if messages else 0
+    return {
+        "id": f"chatcmpl-{uuid.uuid4().hex}",
+        "object": "chat.completion",
+        "created": created or int(time.time()),
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": content},
+            "finish_reason": "stop",
+        }],
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+            "prompt_tokens_details": {
+                "text_tokens": prompt_text_tokens,
+                "image_tokens": prompt_image_tokens,
+                "cached_tokens": 0,
+            },
+            "completion_tokens_details": {
+                "text_tokens": completion_tokens,
+                "image_tokens": 0,
+                "reasoning_tokens": 0,
+            },
+        },
+    }
+
+
+def stream_text_chat_completion(backend, messages: list[dict[str, Any]], model: str) -> Iterator[dict[str, Any]]:
+    completion_id = f"chatcmpl-{uuid.uuid4().hex}"
+    created = int(time.time())
+    sent_role = False
+    request = ConversationRequest(model=model, messages=messages)
+    for delta_text in stream_text_deltas(backend, request):
+        if not sent_role:
+            sent_role = True
+            yield completion_chunk(model, {"role": "assistant", "content": delta_text}, None, completion_id, created)
+        else:
+            yield completion_chunk(model, {"content": delta_text}, None, completion_id, created)
+    if not sent_role:
+        yield completion_chunk(model, {"role": "assistant", "content": ""}, None, completion_id, created)
+    yield completion_chunk(model, {}, "stop", completion_id, created)
+
+
+def collect_chat_content(chunks: Iterable[dict[str, Any]]) -> str:
+    parts: list[str] = []
+    for chunk in chunks:
+        choices = chunk.get("choices")
+        first = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+        delta = first.get("delta") if isinstance(first.get("delta"), dict) else {}
+        content = str(delta.get("content") or "")
+        if content:
+            parts.append(content)
+    return "".join(parts)
+
+
+def _gptfree_response_input(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for message in messages:
+        role = str(message.get("role") or "user").strip() or "user"
+        content = message.get("content", "")
+        if isinstance(content, str):
+            items.append({"role": role, "content": content})
+            continue
+        if not isinstance(content, list):
+            items.append({"role": role, "content": str(content or "")})
+            continue
+        parts: list[dict[str, Any]] = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            part_type = str(part.get("type") or "").strip()
+            if part_type in {"text", "input_text", "output_text"}:
+                parts.append({"type": "input_text", "text": str(part.get("text") or "")})
+            elif part_type in {"image_url", "input_image"}:
+                image_url = part.get("image_url")
+                if isinstance(image_url, dict):
+                    image_url = image_url.get("url")
+                image_url = image_url or part.get("url")
+                if image_url:
+                    parts.append({"type": "input_image", "image_url": str(image_url)})
+        items.append({"role": role, "content": parts or ""})
+    return items
+
+
+def stream_gptfree_chat_completion(
+    body: dict[str, Any],
+    messages: list[dict[str, Any]],
+) -> Iterator[dict[str, Any]]:
+    model = str(body.get("model") or "gptfree")
+    completion_id = f"chatcmpl-{uuid.uuid4().hex}"
+    created = int(time.time())
+    sent_role = False
+    response_body: dict[str, Any] = {
+        "model": model,
+        "input": _gptfree_response_input(messages),
+        "stream": True,
+    }
+    reasoning = body.get("reasoning")
+    if isinstance(reasoning, dict):
+        response_body["reasoning"] = reasoning
+    else:
+        effort = str(
+            body.get("reasoning_effort") or body.get("thinking_effort") or ""
+        ).strip().lower()
+        if effort:
+            response_body["reasoning"] = {
+                "effort": "xhigh" if effort == "extended" else effort
+            }
+    for event in gptfree_response_service.stream(response_body):
+        if event.get("type") != "response.output_text.delta":
+            continue
+        delta = str(event.get("delta") or "")
+        if not delta:
+            continue
+        if not sent_role:
+            sent_role = True
+            yield completion_chunk(
+                model,
+                {"role": "assistant", "content": delta},
+                None,
+                completion_id,
+                created,
+            )
+        else:
+            yield completion_chunk(
+                model,
+                {"content": delta},
+                None,
+                completion_id,
+                created,
+            )
+    if not sent_role:
+        yield completion_chunk(
+            model,
+            {"role": "assistant", "content": ""},
+            None,
+            completion_id,
+            created,
+        )
+    yield completion_chunk(model, {}, "stop", completion_id, created)
+
+
+def chat_messages_from_body(body: dict[str, Any]) -> list[dict[str, Any]]:
+    messages = body.get("messages")
+    if isinstance(messages, list) and messages:
+        return [message for message in messages if isinstance(message, dict)]
+    prompt = str(body.get("prompt") or "").strip()
+    if prompt:
+        return [{"role": "user", "content": prompt}]
+    raise HTTPException(status_code=400, detail={"error": "messages or prompt is required"})
+
+
+def chat_image_args(body: dict[str, Any]) -> tuple[str, str, int, list[tuple[bytes, str, str]]]:
+    model = str(body.get("model") or "gpt-image-2").strip() or "gpt-image-2"
+    prompt = extract_chat_prompt(body)
+    if not prompt:
+        raise HTTPException(status_code=400, detail={"error": "prompt is required"})
+    images = [
+        (data, f"image_{idx}.png", mime)
+        for idx, (data, mime) in enumerate(extract_chat_image(body), start=1)
+    ]
+    return model, prompt, parse_image_count(body.get("n")), images
+
+
+def text_chat_parts(body: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
+    model = str(body.get("model") or "auto").strip() or "auto"
+    messages = normalize_text_messages(normalize_messages(chat_messages_from_body(body)))
+    tools = body.get("tools")
+    if isinstance(tools, list) and tools:
+        messages.insert(0, {"role": "system", "content": TOOL_UNAVAILABLE_SYSTEM_MESSAGE})
+    return model, messages
+
+
+def image_result_content(result: dict[str, Any]) -> str:
+    data = result.get("data")
+    if isinstance(data, list) and data:
+        return build_chat_image_markdown_content(result)
+    return str(result.get("message") or "Image generation completed.")
+
+
+def image_chat_response(body: dict[str, Any]) -> dict[str, Any]:
+    model, prompt, n, images = chat_image_args(body)
+    result = collect_image_outputs(stream_image_outputs_with_pool(ConversationRequest(
+        prompt=prompt,
+        model=model,
+        n=n,
+        response_format="b64_json",
+        images=encode_images(images) or None,
+    )))
+    response = completion_response(model, image_result_content(result), int(result.get("created") or 0) or None)
+    usage = image_usage(
+        input_text_tokens=count_text_tokens(prompt, model),
+        input_image_tokens=count_image_inputs_tokens(images, model),
+        output_tokens=count_image_output_items_tokens(result.get("data")),
+    )
+    response["usage"] = chat_usage_from_image_usage(usage)
+    return response
+
+
+def image_chat_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    model, prompt, n, images = chat_image_args(body)
+    image_outputs = stream_image_outputs_with_pool(ConversationRequest(
+        prompt=prompt,
+        model=model,
+        n=n,
+        response_format="b64_json",
+        images=encode_images(images) or None,
+    ))
+    yield from stream_image_chat_completion(image_outputs, model)
+
+
+def stream_image_chat_completion(image_outputs: Iterable[ImageOutput], model: str) -> Iterator[dict[str, Any]]:
+    completion_id = f"chatcmpl-{uuid.uuid4().hex}"
+    created = int(time.time())
+    sent_role = False
+    sent_text = ""
+    for output in image_outputs:
+        content = ""
+        if output.kind == "progress":
+            content = output.text
+            sent_text += content
+        elif output.kind == "result":
+            content = build_chat_image_markdown_content({"data": output.data})
+        elif output.kind == "message":
+            content = output.text[len(sent_text):] if output.text.startswith(sent_text) else output.text
+        if not content:
+            continue
+        if not sent_role:
+            sent_role = True
+            yield completion_chunk(model, {"role": "assistant", "content": content}, None, completion_id, created)
+        else:
+            yield completion_chunk(model, {"content": content}, None, completion_id, created)
+    if not sent_role:
+        yield completion_chunk(model, {"role": "assistant", "content": ""}, None, completion_id, created)
+    yield completion_chunk(model, {}, "stop", completion_id, created)
+
+
+def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
+    account_pool = str(body.get("account_pool") or "default").strip().lower()
+    if account_pool not in {"default", "gptfree"}:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "account_pool must be default or gptfree"},
+        )
+    if body.get("stream"):
+        if is_image_chat_request(body):
+            return image_chat_events(body)
+        model, messages = text_chat_parts(body)
+        if account_pool == "gptfree" or is_gptfree_request_model(model):
+            return stream_gptfree_chat_completion(body, messages)
+        key = cache_key(body, messages, stream=True)
+        return chat_completion_cache.get_or_compute_stream(
+            key,
+            lambda: stream_text_chat_completion(text_backend("default"), messages, model),
+        )
+    if is_image_chat_request(body):
+        return image_chat_response(body)
+    model, messages = text_chat_parts(body)
+    if account_pool == "gptfree" or is_gptfree_request_model(model):
+        content = collect_chat_content(stream_gptfree_chat_completion(body, messages))
+        return completion_response(model, content, messages=messages)
+    key = cache_key(body, messages, stream=False)
+    return chat_completion_cache.get_or_compute_response(
+        key,
+        lambda: completion_response(
+            model,
+            collect_text(
+                text_backend("default"),
+                ConversationRequest(model=model, messages=messages),
+            ),
+            messages=messages,
+        ),
+    )

@@ -1,0 +1,80 @@
+services:
+  warp-proxy:
+    image: caomingjun/warp:latest
+    container_name: chatgpt2api-warp-proxy
+    restart: unless-stopped
+    environment:
+      WARP_SLEEP: "2"
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: 0
+      net.ipv4.conf.all.src_valid_mark: 1
+    ports:
+      - "127.0.0.1:41000:1080"
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import socket; s=socket.create_connection(('127.0.0.1', 1080), 5); s.close()\""]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+  privoxy:
+    image: vimagick/privoxy:latest
+    container_name: chatgpt2api-privoxy
+    restart: unless-stopped
+    depends_on:
+      - warp-proxy
+    volumes:
+      - ./scripts/privoxy-warp.conf:/etc/privoxy/config:ro
+    ports:
+      - "127.0.0.1:41080:8118"
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 8118 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr
+    restart: unless-stopped
+    environment:
+      LOG_LEVEL: info
+      TZ: Etc/UTC
+    ports:
+      - "127.0.0.1:8191:8191"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8191/ >/dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: chatgpt2api-img2:register-v141-warp-clearance-20260713-180159
+    container_name: chatgpt2api-img2
+    restart: unless-stopped
+    depends_on:
+      - privoxy
+      - flaresolverr
+    ports:
+      - "3020:80"
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./data:/app/data
+      - ./config.json:/app/config.json
+      - ./services/register/openai_register.py:/app/services/register/openai_register.py:ro
+      - ./services/proxy_service.py:/app/services/proxy_service.py:ro
+      - ./services/config.py:/app/services/config.py:ro
+      - ./services/register_service.py:/app/services/register_service.py:ro

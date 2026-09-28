@@ -1,0 +1,35 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+web_dist
+web/.next/
+web/out/
+web/node_modules/
+codex_register/node_modules/
+codex_register/bundle/
+codex_register/config.json
+codex_register/auth/
+codex_register/hotmail/
+deploy-backups/
+# Virtual environments
+.venv
+.idea
+data
+config.json
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.log
+*.jsonl
+edit
+test
+
+docker-compose-local.yml
+
+.claude/settings.local.json
