@@ -293,8 +293,10 @@ export default function ImagePage() {
 
   useEffect(() => {
     const panel = resultsScrollRef.current;
-    if (panel && selectedTurns.length) panel.scrollTo({ top: panel.scrollHeight, behavior: "smooth" });
-  }, [selectedConversationId, selectedTurns.length, variant]);
+    if (!panel || !selectedTurns.length) return;
+    const frame = requestAnimationFrame(() => panel.scrollTo({ top: variant === "b" ? 0 : panel.scrollHeight, behavior: "auto" }));
+    return () => cancelAnimationFrame(frame);
+  }, [selectedConversationId, selectedTurns.length, variant, canvasTurnId]);
 
   useEffect(() => {
     conversationsRef.current = conversations;

@@ -59,6 +59,8 @@ const check = (name,value) => {assert.ok(value,name);checks.push(name);};
    check('composer-not-remounted-'+width,await page.evaluate(()=>window.__draftNode===document.querySelector('textarea')));
    check('reference-and-thread-preserved-'+width,await page.getByRole('button',{name:'移除参考图 1',exact:true}).isVisible() && await page.getByText('继续当前对话 · 已有 2 轮',{exact:true}).isVisible());
    await page.getByRole('button',{name:'第 1 轮',exact:true}).click();
+   await page.waitForFunction(()=>document.querySelector('[data-testid=image-results-scroll]').scrollTop===0);
+   check('canvas-round-starts-at-image-'+width,await page.getByRole('button',{name:'查看结果图 1',exact:true}).isVisible());
    check('canvas-round-selector-'+width,(await page.locator('.whitespace-pre-wrap').textContent()).includes('第 1 轮'));
    await page.screenshot({path:out+'/b-'+width+'.png',fullPage:true});
    await a.click();await page.locator('.studio-workspace[data-layout=a]').waitFor();
