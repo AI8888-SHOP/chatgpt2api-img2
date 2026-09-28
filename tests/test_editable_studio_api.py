@@ -109,5 +109,19 @@ class StudioApiTests(unittest.TestCase):
         r=self.client.post("/v1/psd/generations",headers=self.headers,json={"prompt":"test","base64_images":["fake"]})
         self.assertEqual(r.status_code,409)
 
+    def test_static_assets_cannot_escape_root_or_follow_external_symlinks(self):
+        public=self.root/"web_dist";public.mkdir()
+        (public/"index.html").write_text("safe-index")
+        (public/"asset.txt").write_text("safe-asset")
+        (self.root/"sentinel.txt").write_text("private-synthetic-sentinel")
+        (public/"linked.txt").symlink_to(self.root/"sentinel.txt")
+        with patch.object(api_module,"WEB_DIST_DIR",public):
+            self.assertIsNone(api_module.resolve_web_asset("../sentinel.txt"))
+            self.assertIsNone(api_module.resolve_web_asset("linked.txt"))
+            self.assertEqual(self.client.get("/asset.txt").text,"safe-asset")
+            for method in (self.client.get,self.client.head):
+                self.assertEqual(method("/%2e%2e/sentinel.txt").status_code,404)
+            self.assertNotIn("private-synthetic-sentinel",self.client.get("/linked.txt").text)
+
 
 if __name__=="__main__":unittest.main()

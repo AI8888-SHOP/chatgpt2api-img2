@@ -823,6 +823,7 @@ def start_auto_register_watcher(stop_event: Event) -> Thread:
 def resolve_web_asset(requested_path: str) -> Path | None:
     if not WEB_DIST_DIR.exists():
         return None
+    root = WEB_DIST_DIR.resolve()
 
     clean_path = requested_path.strip("/")
     if not clean_path:
@@ -837,8 +838,9 @@ def resolve_web_asset(requested_path: str) -> Path | None:
 
     for candidate in candidates:
         try:
-            candidate.relative_to(WEB_DIST_DIR)
-        except ValueError:
+            candidate = candidate.resolve()
+            candidate.relative_to(root)
+        except (ValueError, OSError, RuntimeError):
             continue
         if candidate.is_file():
             return candidate
@@ -2377,6 +2379,8 @@ def create_app() -> FastAPI:
     app.include_router(admin_router)
 
     def serve_web_file(full_path: str):
+        if ".." in Path(full_path).parts or "\\" in full_path:
+            raise HTTPException(status_code=404, detail="Not Found")
         asset = resolve_web_asset(full_path)
         if asset is not None:
             return FileResponse(asset)
