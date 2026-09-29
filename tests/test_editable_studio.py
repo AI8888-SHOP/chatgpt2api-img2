@@ -58,6 +58,149 @@ class StudioTest(unittest.TestCase):
         self.assertEqual(s.connection(optimizer),("https://example.test/v1","secret","test"))
         self.assertFalse(optimizer.enabled)
 
+    def plan_request(self, client="plan-client-one", **changes):
+        return PlanRequest(**{"kind":"ppt","prompt":"三页演示","page_count":3,"client_task_id":client,**changes})
+
+    def install_plan_provider(self):
+        calls=[]
+        class FakeProvider:
+            usage_tokens=150;output_tokens=50;usage_known=True
+            def __init__(self,*args):pass
+            def produce(self,brief,images,**kwargs):
+                calls.append((brief,images,kwargs))
+                return ppt_plan()
+        self.service.provider_factory=FakeProvider
+        return calls
+
+    def test_async_plan_is_durable_and_deduplicated_across_threads(self):
+        calls=self.install_plan_provider()
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            tasks=list(pool.map(lambda _:self.service.plan(self.user,self.plan_request()),range(5)))
+        self.assertEqual(len({t["id"] for t in tasks}),1)
+        self.assertEqual(calls,[])
+        restarted=StudioService(self.config,self.users,self.service.root,provider_factory=self.service.provider_factory)
+        queued=restarted.store.get_plan_task(self.user.id,tasks[0]["id"])
+        self.assertEqual(queued["status"],"queued")
+        self.assertNotIn(self.s.api_key,queued["settings"])
+        self.assertNotIn("base_url",queued["settings"])
+        claimed=restarted.store.claim("worker",self.s)
+        restarted.run_plan(claimed)
+        result=restarted.public_plan_task(restarted.store.get_plan_task(self.user.id,tasks[0]["id"]))
+        self.assertEqual(result["status"],"success")
+        self.assertEqual(result["result"]["plan"]["title"],"演示")
+        self.assertEqual(len(calls),1)
+        self.assertEqual(calls[0][2]["deadline"],claimed["deadline"])
+        self.assertEqual(self.balance(),100)
+        repeated=self.service.plan(self.user,self.plan_request())
+        self.assertEqual(repeated["id"],result["id"])
+        with self.store.connect() as c:
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM studio_calls").fetchone()[0],1)
+            self.assertEqual(c.execute("SELECT actual_tokens FROM studio_calls").fetchone()[0],150)
+
+    def test_async_plan_duplicate_with_changed_request_rejected(self):
+        self.service.plan(self.user,self.plan_request())
+        with self.assertRaises(HTTPException) as error:
+            self.service.plan(self.user,self.plan_request(prompt="不同需求"))
+        self.assertEqual(error.exception.status_code,409)
+
+    def test_async_plan_and_generation_share_queue_and_concurrency(self):
+        self.s.global_concurrency=1;self.s.global_queue_size=1
+        self.config.data["editable_studio"].update(global_concurrency=1,global_queue_size=1)
+        self.install_plan_provider()
+        task=self.service.plan(self.other,self.plan_request())
+        self.service.submit(self.user,self.body())
+        with self.assertRaises(HTTPException) as error:
+            self.service.submit(self.user,self.body("second-client-id"))
+        self.assertEqual(error.exception.status_code,429)
+        claimed=self.store.claim("worker",self.s)
+        self.assertEqual(claimed["id"],task["id"])
+        self.assertIsNone(self.store.claim("worker",self.s))
+        self.service.run_plan(claimed)
+        self.assertIsNotNone(self.store.claim("worker",self.s))
+
+    def test_async_plan_same_user_never_runs_with_generation(self):
+        self.install_plan_provider()
+        self.service.submit(self.user,self.body())
+        self.service.plan(self.user,self.plan_request())
+        job=self.store.claim("worker",self.s)
+        self.assertNotIn("task_type",job)
+        self.assertIsNone(self.store.claim("worker",self.s))
+        self.store.finish(job["id"],error="test")
+        self.assertEqual(self.store.claim("worker",self.s)["task_type"],"plan")
+
+    def test_async_plan_stale_worker_and_late_result_cannot_publish(self):
+        self.install_plan_provider()
+        task=self.service.plan(self.user,self.plan_request())
+        claimed=self.store.claim("dead-worker",self.s)
+        self.store.reap();self.store.reap()
+        self.service.run_plan(claimed)
+        row=self.store.get_plan_task(self.user.id,task["id"])
+        self.assertEqual(row["status"],"failed")
+        self.assertIn("服务中断",row["error"])
+        with self.assertRaises(HTTPException):self.store.get_plan(self.user.id,claimed["plan_id"])
+        self.assertEqual(self.balance(),100)
+
+    def test_async_plan_deadline_rejects_late_success(self):
+        self.install_plan_provider()
+        task=self.service.plan(self.user,self.plan_request())
+        claimed=self.store.claim("worker",self.s)
+        with self.store.connect(True) as c:c.execute("UPDATE studio_plan_tasks SET deadline=1 WHERE id=?",(task["id"],))
+        self.service.run_plan(claimed)
+        self.assertEqual(self.store.get_plan_task(self.user.id,task["id"])["status"],"failed")
+        with self.assertRaises(HTTPException):self.store.get_plan(self.user.id,claimed["plan_id"])
+
+    def test_async_plan_failure_keeps_budget_and_never_debits_credits(self):
+        self.install_plan_provider()
+        task=self.service.plan(self.user,self.plan_request())
+        self.service.provider_factory.usage_known=False
+        with patch.object(self.service.provider_factory,"produce",side_effect=StudioProviderError("文档 API 请求超时")):
+            self.service.run_plan(self.store.claim("worker",self.s))
+        row=self.store.get_plan_task(self.user.id,task["id"])
+        self.assertEqual(row["status"],"failed")
+        self.assertIsNone(row["actual_tokens"])
+        self.assertGreater(row["budget"],0)
+        self.assertEqual(self.balance(),100)
+
+    def test_async_plan_success_is_not_overwritten_by_late_failure(self):
+        self.install_plan_provider()
+        task=self.service.plan(self.user,self.plan_request())
+        self.service.run_plan(self.store.claim("worker",self.s))
+        self.assertFalse(self.store.finish_plan_task(task["id"],error="late failure"))
+        self.assertEqual(self.store.get_plan_task(self.user.id,task["id"])["status"],"success")
+
+    def test_async_plan_preparing_timeout_is_terminal(self):
+        task={"client_id":"preparing-client","fingerprint":"test","plan_id":"b"*32,"revision":1,"kind":"ppt","request":"{}","settings":"{}"}
+        row=self.store.reserve_plan(self.user.id,"b"*32,100,self.s,task=task)
+        with self.store.connect(True) as c:c.execute("UPDATE studio_calls SET lease=1 WHERE id=?",(row["id"],))
+        self.store.reap()
+        self.assertEqual(self.store.get_plan_task(self.user.id,row["id"])["status"],"failed")
+        with self.assertRaises(HTTPException):self.store.queue_plan_task(row["id"],[])
+
+    def test_async_plan_failure_cleanup_and_reference_retention(self):
+        stream=BytesIO();Image.new("RGB",(40,40),"red").save(stream,"PNG")
+        data=base64.b64encode(stream.getvalue()).decode()
+        task=self.service.plan(self.user,self.plan_request(base64_images=[data]))
+        row=self.store.get_plan_task(self.user.id,task["id"])
+        folder=self.service.root/"inputs"/row["plan_id"]
+        os.utime(folder,(1,1))
+        self.service.prune()
+        self.assertTrue(folder.is_dir())
+        self.install_plan_provider()
+        with patch.object(self.service.provider_factory,"produce",side_effect=StudioProviderError("test failure")):
+            self.service.run_plan(self.store.claim("worker",self.s))
+        self.assertFalse(folder.exists())
+
+    def test_async_plan_limits_are_snapshotted_without_credentials(self):
+        calls=self.install_plan_provider()
+        task=self.service.plan(self.user,self.plan_request())
+        self.config.data["editable_studio"].update(request_timeout_seconds=600)
+        row=self.store.claim("worker",self.config.get_studio_settings())
+        self.assertAlmostEqual(row["deadline"]-row["started"],180)
+        self.service.run_plan(row)
+        self.assertEqual(len(calls),1)
+        public=self.service.public_plan_task(self.store.get_plan_task(self.user.id,task["id"]))
+        self.assertNotIn(self.s.api_key,json.dumps(public))
+
     def test_settings_secret_redaction_preservation_and_clear(self):
         public=self.config.get()["editable_studio"]
         self.assertNotIn(self.s.api_key,json.dumps(public))

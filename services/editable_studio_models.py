@@ -68,7 +68,13 @@ class DocumentPlan(StrictModel):
         return self
 
 
+class RequirementOptimizeRequest(StrictModel):
+    kind: Literal["ppt", "psd"]
+    prompt: str = Field(min_length=1, max_length=8000)
+
+
 class PlanRequest(StrictModel):
+    client_task_id: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9_-]{8,80}$")
     kind: Literal["ppt", "psd"]
     prompt: str = Field(min_length=1, max_length=8000)
     template_id: Literal["business", "product", "proposal", "education"] = "business"

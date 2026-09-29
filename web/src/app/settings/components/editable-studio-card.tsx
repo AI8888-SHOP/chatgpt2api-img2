@@ -9,10 +9,10 @@ import type { StudioAdminConfig } from "@/lib/editable-studio";
 import { useSettingsStore } from "../store";
 
 const fields = [
-  ["plan_user_rpm", "需求整理：每用户 RPM", 1, 30], ["plan_daily_requests", "需求整理：每用户每天次数", 1, 1000], ["plan_revisions", "每草稿 AI 整理次数", 1, 10],
+  ["plan_user_rpm", "方案生成：每用户 RPM", 1, 30], ["plan_daily_requests", "方案生成：每用户每天次数", 1, 1000], ["plan_revisions", "每草稿 AI 方案次数", 1, 10],
   ["generation_user_rpm", "正式生成：每用户 RPM", 1, 20], ["user_daily_jobs", "每用户每天正式任务", 1, 1000], ["user_queue_size", "每用户排队数（另有 1 个执行位）", 0, 10],
   ["global_concurrency", "全站最大并发", 1, 16], ["global_queue_size", "全站排队上限", 1, 500],
-  ["max_input_tokens", "单次文本输入 Token 上限（含固定指令）", 512, 32768], ["plan_output_tokens", "整理输出 Token 上限（含思考）", 1024, 32768],
+  ["max_input_tokens", "单次文本输入 Token 上限（含固定指令）", 512, 32768], ["plan_output_tokens", "方案输出 Token 上限（含思考）", 1024, 32768],
   ["generation_output_tokens", "生成单次输出 Token 上限（含思考）", 4096, 65536], ["task_output_tokens", "生成整任务输出预算（含重试）", 4096, 131072],
   ["upstream_input_reserve", "每次上游额外输入 Token 预留", 0, 131072], ["image_token_reserve", "每张图片 Token 预留", 1024, 32768],
   ["user_daily_tokens", "每用户每日总 Token 预算", 8192, 10000000], ["global_daily_tokens", "全站每日总 Token 预算", 32768, 100000000],
@@ -37,6 +37,7 @@ export function EditableStudioCard() {
     <div className="flex gap-3"><FileSliders className="size-5" /><div><h2 className="text-lg font-semibold">PPT / PSD 文档工作室 · 独立 API</h2><p className="text-sm text-stone-500">AI 分析与内容制作，受控程序导出真实可编辑文件。不使用 ChatGPT 账号池。</p></div></div>
     <fieldset disabled={!config || saving} className="space-y-5">
       <label className="flex gap-3 text-sm"><input type="checkbox" checked={settings.enabled} onChange={e => patch({ enabled: e.target.checked })} />启用 API 文档工作室</label>
+      <p className="text-xs leading-6 text-stone-500">“优化需求”仅整理文字，使用“提示词优化 API”的启用开关、连接与共享限额，最多 30 秒、输入 2048 / 输出 512 Token（管理员设置更低时取更低值）。“生成方案”和文件制作使用本卡配置；不启用文本优化也可生成方案。</p>
       <label className="flex gap-3 text-sm"><input type="checkbox" checked={settings.reuse_optimizer_connection} onChange={e => patch({ reuse_optimizer_connection: e.target.checked })} />复用提示词优化的 API 地址、密钥、模型（不受其启用开关影响）</label>
       {!settings.reuse_optimizer_connection && <div className="grid gap-4 md:grid-cols-2">
         <label className="space-y-2 text-sm">API Base URL（含 /v1）<Input value={settings.base_url} onChange={e => patch({ base_url: e.target.value })} /></label>

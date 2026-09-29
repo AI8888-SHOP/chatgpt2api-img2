@@ -16,7 +16,7 @@ from typing import Any, Iterator, Literal
 from fastapi import APIRouter, Cookie, FastAPI, File, Form, Header, HTTPException, Request, Response, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -33,7 +33,7 @@ from services.content_filter import check_request
 from services.cpa_service import cpa_config, cpa_import_service, list_remote_files
 from services.editable_file_task_service import editable_file_task_service
 from services.editable_studio_service import StudioService
-from services.editable_studio_models import PlanRequest, GenerateRequest
+from services.editable_studio_models import PlanRequest, GenerateRequest, RequirementOptimizeRequest
 from services.proxy_service import test_proxy
 from services.protocol import openai_v1_chat_complete, openai_v1_models, openai_v1_response
 from services.register_service import (
@@ -925,13 +925,44 @@ def create_app() -> FastAPI:
         studio_user(authorization)
         return studio.public_config()
 
-    @router.post("/v1/editable-studio/plans")
+    @router.post("/v1/editable-studio/requirements/optimize")
+    async def studio_optimize_requirement(request: Request, authorization: str | None = Header(default=None)):
+        user = studio_user(authorization)
+        if not config.get_studio_settings().enabled:
+            raise HTTPException(503,detail={"error":"文档工作室尚未启用，请联系管理员"})
+        body = await studio_body(request,RequirementOptimizeRequest,64*1024,user.id)
+        await run_in_threadpool(check_request,body.prompt)
+        result = await prompt_optimizer.optimize(user,body.prompt,studio.optimization_settings(),purpose=body.kind)
+        return JSONResponse(result,headers={"Cache-Control":"private, no-store"})
+
+    @router.post("/v1/editable-studio/plans", status_code=202)
     async def studio_plan(request: Request, authorization: str | None = Header(default=None)):
         user = studio_user(authorization)
         s = studio.settings()
         body = await studio_body(request,PlanRequest,min(128*1024*1024,s.max_reference_images*s.max_image_mb*1024*1024*4//3+65536),user.id)
         await run_in_threadpool(check_request,body.prompt)
-        return await run_in_threadpool(studio.plan,user,body)
+        task = await run_in_threadpool(studio.plan,user,body)
+        return JSONResponse(task,status_code=202,headers={"Cache-Control":"private, no-store"})
+
+    @router.get("/v1/editable-studio/plans")
+    async def studio_plan_history(authorization: str | None = Header(default=None)):
+        user = studio_user(authorization)
+        rows = await run_in_threadpool(studio.store.list_plan_tasks,user.id)
+        items = await run_in_threadpool(lambda: [studio.public_plan_task(row) for row in rows])
+        return JSONResponse({"items":items},headers={"Cache-Control":"private, no-store"})
+
+    @router.get("/v1/editable-studio/plans/{task_id}")
+    async def studio_plan_progress(task_id: str, authorization: str | None = Header(default=None)):
+        user = studio_user(authorization)
+        row = await run_in_threadpool(studio.store.get_plan_task,user.id,task_id)
+        task = await run_in_threadpool(studio.public_plan_task,row)
+        return JSONResponse(task,headers={"Cache-Control":"private, no-store"})
+
+    @router.get("/v1/editable-studio/plans/{task_id}/images/{index}")
+    async def studio_plan_image(task_id: str, index: int, authorization: str | None = Header(default=None)):
+        user = studio_user(authorization)
+        path = await run_in_threadpool(studio.plan_image_path,user.id,task_id,index)
+        return FileResponse(path,headers={"Cache-Control":"private, no-store","X-Content-Type-Options":"nosniff"})
 
     @router.post("/v1/editable-studio/jobs")
     async def studio_submit(request: Request, authorization: str | None = Header(default=None)):

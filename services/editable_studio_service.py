@@ -42,7 +42,22 @@ class StudioService:
 
     def public_config(self):
         s = self.config.get_studio_settings()
-        return {"enabled":s.enabled,"templates":TEMPLATES,"limits":{k:getattr(s,k) for k in ("max_pages","max_layers","max_image_mb","max_image_pixels","max_reference_images","plan_revisions","plan_user_rpm","plan_daily_requests","user_daily_jobs","user_queue_size","ppt_page_price","psd_task_price","retention_days")}}
+        optimizer = self.optimization_settings()
+        return {"enabled":s.enabled,"templates":TEMPLATES,"optimization":{k:getattr(optimizer,k) for k in ("enabled","timeout_seconds","max_input_tokens","max_output_tokens","user_rpm","user_daily_requests")},"limits":{k:getattr(s,k) for k in ("max_pages","max_layers","max_image_mb","max_image_pixels","max_reference_images","plan_revisions","plan_user_rpm","plan_daily_requests","user_daily_jobs","user_queue_size","ppt_page_price","psd_task_price","retention_days")}}
+
+    def optimization_settings(self):
+        s = self.config.get_studio_settings()
+        optimizer = self.config.get_prompt_optimizer_settings()
+        # Share the existing optimizer admission ledger, including failed attempts.
+        # Hard caps keep this optional text-only step separate from full planning.
+        return optimizer.model_copy(update={
+            "enabled":s.enabled and optimizer.enabled,
+            "timeout_seconds":min(30,optimizer.timeout_seconds),
+            "max_input_tokens":min(2048,optimizer.max_input_tokens),
+            "max_output_tokens":min(512,optimizer.max_output_tokens),
+            "min_quota":max(s.min_quota,optimizer.min_quota),
+            "min_account_age_seconds":max(s.min_account_age_seconds,optimizer.min_account_age_seconds),
+        })
 
     def _validate_plan(self, plan, images, s):
         if len(plan.slides)>s.max_pages or len(plan.layers)+1>s.max_layers:
@@ -60,6 +75,14 @@ class StudioService:
         return paths
 
     def plan(self, user, request):
+        # Admission and local image validation only: never wait for the AI here.
+        client_id = request.client_task_id or uuid.uuid4().hex
+        fingerprint = hashlib.sha256(request.model_dump_json(exclude={"client_task_id"}).encode()).hexdigest()
+        existing = self.store.find_plan_submission(user.id,client_id)
+        if existing:
+            if existing["fingerprint"] != fingerprint:
+                failure(409,"此提交编号已用于不同的需求")
+            return self.public_plan_task(existing)
         s = self.settings()
         if (request.kind=="ppt" and request.page_count>s.max_pages) or (request.kind=="psd" and request.layer_count>s.max_layers):
             failure(422, "页面或图层数量超限")
@@ -73,39 +96,91 @@ class StudioService:
         previous_images = json.loads(prior["images"]) if prior and not request.base64_images else []
         count = len(request.base64_images) if request.base64_images else len(previous_images)
         budget = s.max_input_tokens+s.upstream_input_reserve+count*s.image_token_reserve+s.plan_output_tokens
-        call_id = self.store.reserve_plan(user.id,root_id,budget,s)
-        provider = None
-        status = "failed"
+        source = request.model_dump(exclude={"base64_images","client_task_id"})
+        if prior:
+            source["_previous_plan"] = json.loads(prior["payload"])
+        snapshot = s.model_dump(exclude={"base_url","api_key","model","enabled","reuse_optimizer_connection"})
+        task = {"client_id":client_id,"fingerprint":fingerprint,"plan_id":plan_id,"revision":revision,"kind":request.kind,
+                "request":json.dumps(source,ensure_ascii=False),"settings":json.dumps(snapshot)}
+        row = self.store.reserve_plan(user.id,root_id,budget,s,task=task)
+        if row["plan_id"] != plan_id:
+            return self.public_plan_task(row)
         destination = self.root/"inputs"/plan_id
         try:
-            provider = self.provider_factory(s,self.config.get_prompt_optimizer_settings())
             paths = self._input_paths(previous_images) if previous_images else save_images(request.base64_images,destination,s,request.kind)
-            brief = request.model_dump(exclude={"base64_images","previous_plan_id"})
+            self.store.queue_plan_task(row["id"],[str(p.relative_to(self.root/"inputs")) for p in paths])
+        except Exception:
+            self.store.finish_plan_task(row["id"],error="素材校验失败，请检查图片并重新提交",usage=0)
+            if destination.exists():
+                shutil.rmtree(destination)
+            raise
+        return self.public_plan_task(self.store.get_plan_task(user.id,row["id"]))
+
+    def public_plan_task(self,row):
+        item = {k:row[k] for k in ("id","kind","status","phase","error")}
+        item["client_task_id"] = row["client_id"]
+        terminal = row["status"] in ("success","failed")
+        item.update({"created_at":datetime.fromtimestamp(row["created"],timezone.utc).isoformat(),
+                     "elapsed_seconds":max(0,int((row["updated"] if terminal else time.time())-row["created"])),
+                     "expired":terminal and row["updated"]<time.time()-86400,
+                     "request":{k:v for k,v in json.loads(row["request"]).items() if k!="_previous_plan"}})
+        item["reference_urls"] = [] if item["expired"] or row["status"]=="failed" else [f"/v1/editable-studio/plans/{row['id']}/images/{i}" for i,_ in enumerate(json.loads(row["images"]))]
+        if row["status"]=="success" and not item["expired"]:
+            item["result"] = {**json.loads(row["result"]),"expires_in":max(0,int(row["updated"]+86400-time.time()))}
+            item["submitted_job_id"] = self.store.plan_submission_job(row["user_id"],row["plan_id"])
+        return item
+
+    def plan_image_path(self,owner,task_id,index):
+        row = self.store.get_plan_task(owner,task_id)
+        if row["status"]=="failed" or row["updated"]<time.time()-86400:
+            failure(410,"参考图已过期，请重新上传")
+        images = json.loads(row["images"])
+        if index<0 or index>=len(images):
+            failure(404,"参考图不存在")
+        return self._input_paths([images[index]])[0]
+
+    def run_plan(self,job):
+        provider, result, error = None, None, ""
+        try:
+            s = self.settings()
+            s = type(s).model_validate({**s.model_dump(),**json.loads(job["settings"])})
+            with self.store.connect() as c:
+                self.store._eligible(c,job["user_id"],s)
+            self.check_storage(s)
+            paths = self._input_paths(json.loads(job["images"]))
+            brief = json.loads(job["request"])
+            previous = brief.pop("_previous_plan",None)
+            brief.pop("previous_plan_id",None)
             brief["task"] = "整理为可供用户确认的制作方案。PPT 严格匹配 page_count，PSD layers 仅含前景，背景不占一个条目。"
             brief["image_count"] = len(paths)
-            if prior:
-                brief["previous_plan"] = json.loads(prior["payload"])
-            result = provider.produce(brief,paths)
-            if result.kind!=request.kind:
+            if previous:
+                brief["previous_plan"] = previous
+            provider = self.provider_factory(s,self.config.get_prompt_optimizer_settings())
+            plan = provider.produce(brief,paths,deadline=job["deadline"])
+            self.store.plan_phase(job["id"],"正在校验制作方案")
+            if plan.kind!=job["kind"]:
                 failure(502, "AI 返回了错误的任务类型")
-            result.template_id = request.template_id
-            result.fill_background = request.fill_background
-            self._validate_plan(result,paths,s)
-            if result.kind=="ppt" and len(result.slides)!=request.page_count:
+            plan.template_id = brief["template_id"]
+            plan.fill_background = brief["fill_background"]
+            self._validate_plan(plan,paths,s)
+            if plan.kind=="ppt" and len(plan.slides)!=brief["page_count"]:
                 failure(502, "AI 大纲页数不符合要求，请重新整理需求")
-            if result.kind=="psd" and len(result.layers)+1>request.layer_count:
+            if plan.kind=="psd" and len(plan.layers)+1>brief["layer_count"]:
                 failure(502, "AI 拆分图层数超过要求，请减少内容后重试")
-            image_refs = [str(p.relative_to(self.root/"inputs")) for p in paths]
-            self.store.save_plan(plan_id,user.id,root_id,revision,result.model_dump(),request.model_dump(exclude={"base64_images"}),image_refs)
-            status = "success"
-            return {"plan_id":plan_id,"plan":result.model_dump(),"price":self.price(result,s),"revision":revision,"expires_in":86400}
+            if provider.usage_tokens>job["budget"]:
+                raise StudioProviderError("上游实际用量超出预留预算，请管理员检查限额参数")
+            result = {"plan_id":job["plan_id"],"plan":plan.model_dump(),"price":self.price(plan,s),"revision":job["revision"],"expires_in":86400}
+        except HTTPException as exc:
+            error = str(exc.detail.get("error","方案生成失败")) if isinstance(exc.detail,dict) else "方案生成失败"
         except StudioProviderError as exc:
-            failure(502,str(exc))
-        finally:
-            usage = provider.usage_tokens if provider and provider.usage_known else None
-            self.store.finish_plan_call(call_id,status,usage)
-            if status!="success" and destination.exists():
-                shutil.rmtree(destination)
+            error = str(exc)
+        except Exception:
+            error = "方案生成失败，请稍后重试；未扣生成积分"
+        usage = provider.usage_tokens if provider and provider.usage_known else None
+        committed = self.store.finish_plan_task(job["id"],result=result,error=error,usage=usage)
+        destination = self.root/"inputs"/job["plan_id"]
+        if not committed and destination.exists():
+            shutil.rmtree(destination)
 
     @staticmethod
     def price(plan,s):
@@ -189,7 +264,8 @@ class StudioService:
                 if s.enabled:
                     job = self.store.claim(self.worker_id,s)
                     if job:
-                        threading.Thread(target=self.run_job,args=(job,),name="studio-"+job["id"][:8],daemon=True).start()
+                        target = self.run_plan if job.get("task_type")=="plan" else self.run_job
+                        threading.Thread(target=target,args=(job,),name="studio-"+job["id"][:8],daemon=True).start()
                 if time.time()-self.last_prune>3600:
                     self.prune()
                     self.last_prune=time.time()
@@ -205,6 +281,7 @@ class StudioService:
             rows = c.execute("SELECT id FROM studio_jobs WHERE status IN ('success','error') AND updated<?",(cutoff,)).fetchall()
             # Keep plan inputs while any recent plan or active job can reference them.
             plans = c.execute("SELECT p.images FROM studio_plans p WHERE p.created>=? OR EXISTS (SELECT 1 FROM studio_jobs j WHERE j.plan_id=p.id AND (j.status IN ('queued','running') OR j.updated>=?))",(time.time()-86400,cutoff)).fetchall()
+            plans += c.execute("SELECT t.images FROM studio_plan_tasks t JOIN studio_calls c ON c.id=t.id WHERE c.status IN ('preparing','queued','running')").fetchall()
         retained = {Path(p).parts[0] for row in plans for p in json.loads(row[0])}
         for row in rows:
             path = self.root/"outputs"/row["id"]

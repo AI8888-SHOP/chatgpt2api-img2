@@ -173,6 +173,11 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["truncated"])
         self.assertLessEqual(len(get_tokenizer("cl100k_base").encode(result["optimized_prompt"])), 64)
 
+    async def test_upstream_length_finish_is_marked_truncated(self):
+        service = self.service(lambda req: httpx.Response(200,json={"choices":[{"message":{"content":"需求未完整"},"finish_reason":"length"}]}))
+        result = await service.optimize(self.user,"产品介绍",settings(),purpose="ppt")
+        self.assertTrue(result["truncated"])
+
     async def test_legacy_parameter_is_admin_controlled(self):
         service = self.service(lambda req: httpx.Response(200, json={"choices": [{"message": {"content": "一只猫，柔和光线"}}]}))
         await service.optimize(self.user, "猫", settings(token_parameter="max_tokens"))

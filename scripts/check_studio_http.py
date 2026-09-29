@@ -63,9 +63,15 @@ def main():
             brief = {"kind":kind, "page_count":3, "layer_count":8, "template_id":"business", "base64_images":[image],
                      "prompt":"制作3页产品介绍演示：封面、两种几何产品介绍、总结。红色为方形示例，蓝色为圆形示例；没有价格或业绩数据。" if kind=="ppt" else "将图中红色产品、蓝色圆形和STUDIO DEMO标题分别拆为3个前景图层，另有背景，保持位置，保留原图像素，不修补背景。"}
             response = client.post("/v1/editable-studio/plans", headers=headers, json=brief)
-            if response.status_code != 200:
+            if response.status_code != 202:
                 raise RuntimeError("planning " + kind + ": " + response.text[:500])
-            draft = response.json()
+            plan_task = response.json()
+            deadline = time.time()+240
+            while time.time()<deadline and plan_task["status"] in ("preparing","queued","running"):
+                time.sleep(1)
+                plan_task = client.get("/v1/editable-studio/plans/"+plan_task["id"],headers=headers).json()
+            assert plan_task["status"] == "success",plan_task.get("error") or plan_task["phase"]
+            draft = plan_task["result"]
             print(json.dumps({"kind":kind,"stage":"plan-confirmed","count":len(draft["plan"]["slides"] or draft["plan"]["layers"])}),flush=True)
             body = {"plan_id":draft["plan_id"],"plan":draft["plan"],"expected_price":draft["price"],"client_task_id":"acceptance-"+kind}
             response = client.post("/v1/editable-studio/jobs", headers=headers, json=body)
