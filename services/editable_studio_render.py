@@ -139,7 +139,12 @@ def psd_document(plan, images, out):
     sw,sh = small.size
     assigned = np.zeros((h,w),dtype=bool)
     extracted = []
-    for item in reversed(plan.layers):
+    # Pixel ownership is not the PSD stacking order. A broad decoration box
+    # can also segment every smaller subject beneath it. Reserve text/logo
+    # and precise local regions first, then let broad regions use the remainder.
+    # Keep the user-confirmed stack order when assembling the native PSD below.
+    candidates = []
+    for index,item in enumerate(plan.layers):
         x,y,bw,bh = item.box
         x0,y0 = int(x*sw/1000),int(y*sh/1000)
         x1,y1 = min(sw,int((x+bw)*sw/1000)),min(sh,int((y+bh)*sh/1000))
@@ -154,6 +159,9 @@ def psd_document(plan, images, out):
         bounded = np.zeros_like(contour)
         bounded[y0:y1,x0:x1] = 1
         contour &= bounded
+        candidates.append((index,item,contour))
+    candidates.sort(key=lambda entry:(0 if entry[1].kind in ("text","logo") else 1,int(entry[2].sum()),-entry[0]))
+    for index,item,contour in candidates:
         mask = np.full((sh,sw),cv2.GC_BGD,np.uint8)
         margin = max(3,int(min(sw,sh)*0.015))
         outer = cv2.dilate(contour,np.ones((margin*2+1,margin*2+1),np.uint8))
@@ -167,23 +175,30 @@ def psd_document(plan, images, out):
         values = distance[contour>0]
         seeds = (contour>0)&(distance>=max(12,float(np.percentile(values,75))))
         if seeds.sum()<4:
-            raise ValueError("无法可靠区分图层与背景，请调整范围或使用更清晰的原图")
+            raise ValueError(f"图层 {index+1} 无法可靠区分前景与背景，请调整范围或使用更清晰的原图")
         mask[seeds]=cv2.GC_FGD
+        cv2.setRNGSeed(0)
         cv2.grabCut(rgb,mask,None,np.zeros((1,65),np.float64),np.zeros((1,65),np.float64),4,cv2.GC_INIT_WITH_MASK)
         foreground = (mask==cv2.GC_FGD)|(mask==cv2.GC_PR_FGD)
         # Do not let color similarity absorb adjacent unrelated elements.
         foreground &= outer>0
         full = cv2.resize(foreground.astype(np.uint8),(w,h),interpolation=cv2.INTER_NEAREST).astype(bool)
-        full &= ~assigned
         full &= rgba[:,:,3]>0
-        if full.sum()<16 or full.sum()>w*h*0.9:
-            raise ValueError("拆分产生空图层或整图复制，已拒绝交付")
+        candidate_pixels = int(full.sum())
+        full &= ~assigned
+        visible_pixels = int(full.sum())
+        if visible_pixels<16:
+            if candidate_pixels>=16:
+                raise ValueError(f"图层 {index+1} 与其他图层重复，去除重叠后没有足够的独立像素。请调整该图层范围或重新生成方案；未交付空图层")
+            raise ValueError(f"图层 {index+1} 未识别到足够的可见像素，请调整范围或重新生成方案；未交付空图层")
+        if visible_pixels>w*h*0.9:
+            raise ValueError(f"图层 {index+1} 接近整张原图，无法作为独立元素交付，请调整拆分方案")
         assigned |= full
         pixels = rgba.copy()
         pixels[~full,3]=0
         pil = Image.fromarray(pixels)
         bounds = pil.getbbox()
-        extracted.append((item,pil.crop(bounds),bounds))
+        extracted.append((index,item,pil.crop(bounds),bounds))
     if not extracted:
         raise ValueError("未生成有效分层")
     background = rgba.copy()
@@ -200,7 +215,7 @@ def psd_document(plan, images, out):
     base_image.save(out/"layer-00.png")
     manifest = [{"file":"layer-00.png","name":"背景","left":0,"top":0,"type":"pixel","background_repaired":plan.fill_background}]
     composite = base_image.copy()
-    for index,(item,pil,bounds) in enumerate(reversed(extracted),1):
+    for index,(_,item,pil,bounds) in enumerate(sorted(extracted,key=lambda entry:entry[0]),1):
         name = item.name+("（像素文字，非字体层）" if item.kind=="text" else "")
         layer = psd.create_pixel_layer(pil,name=f"Layer {index}",left=bounds[0],top=bounds[1])
         layer.name = name
@@ -218,6 +233,12 @@ def psd_document(plan, images, out):
     reopened = PSDImage.open(target)
     if len(reopened)!=len(manifest) or reopened.size!=(w,h) or any(not layer.has_pixels() for layer in reopened):
         raise ValueError("PSD 图层结构验收失败")
+    # Native layers may store alpha in a mask instead of raw pixel channels.
+    # Check the visible foreground after masks, not only has_pixels()/topil().
+    for index,layer in enumerate(list(reopened)[1:],1):
+        rendered = layer.composite()
+        if rendered is None or int((np.array(rendered.convert("RGBA"))[:,:,3]>0).sum())<16:
+            raise ValueError(f"PSD 图层 {index} 的可见像素验收失败，未交付空图层")
     native_composite = np.array(reopened.composite().convert("RGBA"))
     expected_composite = np.array(composite)
     visible = expected_composite[:,:,3]>0
