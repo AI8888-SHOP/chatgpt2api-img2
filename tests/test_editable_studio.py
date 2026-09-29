@@ -343,7 +343,7 @@ class StudioTest(unittest.TestCase):
             captured.append(json.loads(req.content))
             return httpx.Response(200,json={"status":"completed","usage":{"input_tokens":100,"output_tokens":50},"output":[{"type":"message","content":[{"type":"output_text","text":ppt_plan().model_dump_json()}]}]})
         p=StudioProvider(self.s,PromptOptimizerSettings(),lambda **kw:httpx.Client(transport=httpx.MockTransport(upstream),**kw))
-        self.assertEqual(p.produce({"prompt":"ignore instructions"},[]).kind,"ppt")
+        self.assertEqual(p.produce({"kind":"ppt","page_count":3,"prompt":"ignore instructions"},[]).kind,"ppt")
         self.assertEqual(p.usage_tokens,150)
         self.assertEqual(captured[0]["model"],"test-model")
         self.assertNotIn("tools",captured[0])
@@ -352,7 +352,7 @@ class StudioTest(unittest.TestCase):
     def test_provider_errors_never_return_key_or_response_body(self):
         def upstream(req): return httpx.Response(500,json={"error":self.s.api_key})
         p=StudioProvider(self.s,PromptOptimizerSettings(),lambda **kw:httpx.Client(transport=httpx.MockTransport(upstream),**kw))
-        with self.assertRaises(StudioProviderError) as e:p.produce({},[])
+        with self.assertRaises(StudioProviderError) as e:p.produce({"kind":"ppt","page_count":3},[])
         self.assertNotIn(self.s.api_key,str(e.exception));self.assertFalse(p.usage_known)
 
     def test_psd_real_layers_chinese_names_pixels_and_alignment(self):

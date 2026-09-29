@@ -138,6 +138,10 @@ export default function EditableStudioPage() {
   };
   const createPlan = async () => {
     if (busy || anyPlanning || draft.optimization) return;
+    const count = kind === "ppt" ? draft.pages : draft.layers;
+    const minimum = kind === "ppt" ? 3 : 2;
+    const maximum = kind === "ppt" ? limits?.max_pages || 20 : limits?.max_layers || 30;
+    if (!Number.isInteger(count) || count < minimum || count > maximum) { setError(`${kind === "ppt" ? "PPT 页数" : "总图层数（含背景）"}必须是 ${minimum}–${maximum} 之间的整数。`); return; }
     if (!draft.prompt.trim() || (kind === "psd" && draft.images.length !== 1 && !(draft.previousPlan && draft.savedImages.length === 1))) { setError(kind === "psd" ? "请上传一张原图并描述需要拆分的元素。" : "请描述 PPT 的主题和用途。"); return; }
     const body = { kind, prompt: draft.prompt, template_id: draft.template, page_count: draft.pages, layer_count: draft.layers, fill_background: draft.fill, base64_images: draft.images.map(x => x.data), previous_plan_id: draft.previousPlan || null };
     const fingerprint = JSON.stringify(body);
@@ -161,6 +165,13 @@ export default function EditableStudioPage() {
   const plan = draft.result?.plan; const price = plan && limits ? kind === "ppt" ? plan.slides.length * limits.ppt_page_price : limits.psd_task_price : 0;
   const submit = async () => {
     if (!draft.result || !plan || draft.optimization || busy) return;
+    if (!plan.title.trim()) { setError("请填写文件标题。"); return; }
+    if (kind === "ppt" && plan.slides.some(s => !s.title.trim() || s.body.length > 5 || s.body.some(t => t.length > 180))) { setError("请填写每页标题；每页正文最多 5 条，每条不要超过 180 字。原文已保留，请调整后提交。"); return; }
+    if (kind === "psd") {
+      const invalid = plan.layers.findIndex(l => { const [x, y, w, h] = l.box; return !l.name.trim() || l.box.some(v => !Number.isInteger(v)) || x < 0 || y < 0 || w <= 0 || h <= 0 || x + w > 1000 || y + h > 1000; });
+      if (invalid >= 0) { setError(`请检查图层 ${invalid + 1}：名称不能为空；坐标须为整数、宽高大于 0，且左 + 宽、上 + 高均不能超过 1000。`); return; }
+      if (plan.layers.length + 1 > Math.min(draft.layers, limits?.max_layers || 30)) { setError("确认方案超过本次总图层上限（含背景），请删除多余图层后重试。"); return; }
+    }
     const fingerprint = JSON.stringify({ id: draft.result.plan_id, plan });
     if (submitKey.current.fingerprint !== fingerprint) submitKey.current = { fingerprint, key: crypto.randomUUID() };
     setBusy("submit"); setError(""); setNotice("");
@@ -186,7 +197,7 @@ export default function EditableStudioPage() {
         <div className="doc-references">{draft.images.map((ref, i) => <div key={i}><img src={ref.data} alt={ref.name} /><button aria-label={"移除参考图 " + (i + 1)} onClick={() => patch({ images: draft.images.filter((_, n) => n !== i) }, true)}><Trash2 size={14} /></button><span>{ref.name}</span></div>)}</div>
         {!draft.images.length && draft.savedImages.length > 0 && <><div className="doc-references">{draft.savedImages.map((path, i) => <div key={path}><PrivateImage path={path} alt={"已保存的参考图 " + (i + 1)} /><span>已保存的参考图 {i + 1}</span></div>)}</div><p className="doc-help">已恢复上次的素材，重新生成方案时会复用。上传新图可替换素材。</p></>}
       </fieldset>
-      {kind === "psd" && <p className="doc-help">优先保留原图像素与位置。文字是可移动的像素层，不是字体层；平面图不包含原始隐藏图层。不开启修补时，遮挡区域保留透明。</p>}
+      {kind === "psd" && <><p className="doc-help">图层数包含 1 个自动背景层：设置 12 层时，最多拆出 11 个前景层，不要求凑满。后台上限不会扩大你为本次任务设置的数量。</p><p className="doc-help">优先保留原图像素与位置。文字是可移动的像素层，不是字体层；平面图不包含原始隐藏图层。不开启修补时，遮挡区域保留透明。</p></>}
       <div className="doc-requirement-actions">
         <Button variant="outline" disabled={!config?.enabled || !config?.optimization?.enabled || !!busy || isPlanning || !!draft.optimization || !draft.prompt.trim()} onClick={() => void optimizeRequirement()}>{busy === "optimize" ? <LoaderCircle className="size-4 animate-spin" /> : <Sparkles className="size-4" />}{busy === "optimize" ? "正在优化文字…" : "优化需求"}</Button>
         <Button className="doc-primary" disabled={!config?.enabled || !plansLoaded || !!busy || anyPlanning || !!draft.optimization || !draft.prompt.trim()} onClick={() => void createPlan()}>{busy === "plan" || isPlanning ? <LoaderCircle className="size-4 animate-spin" /> : <FileSliders className="size-4" />}{busy === "plan" ? "正在提交后台任务…" : isPlanning ? "后台正在生成方案…" : "生成方案"}</Button>

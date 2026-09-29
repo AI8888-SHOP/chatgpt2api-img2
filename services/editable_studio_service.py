@@ -15,6 +15,7 @@ from fastapi import HTTPException
 
 from services.editable_studio_images import save_images
 from services.editable_studio_models import DocumentPlan
+from services.editable_studio_constraints import DocumentConstraints, DocumentCountError
 from services.editable_studio_provider import StudioProvider, StudioProviderError
 from services.editable_studio_store import StudioStore, failure
 from services.editable_studio_templates import TEMPLATES
@@ -151,7 +152,7 @@ class StudioService:
             brief = json.loads(job["request"])
             previous = brief.pop("_previous_plan",None)
             brief.pop("previous_plan_id",None)
-            brief["task"] = "整理为可供用户确认的制作方案。PPT 严格匹配 page_count，PSD layers 仅含前景，背景不占一个条目。"
+            brief["task"] = "整理为可供用户确认的制作方案。PPT 严格匹配 page_count；PSD layer_count 是包含 1 个自动背景的总上限，layers 最多 layer_count-1 个前景，允许少于上限。"
             brief["image_count"] = len(paths)
             if previous:
                 brief["previous_plan"] = previous
@@ -162,17 +163,14 @@ class StudioService:
                 failure(502, "AI 返回了错误的任务类型")
             plan.template_id = brief["template_id"]
             plan.fill_background = brief["fill_background"]
+            DocumentConstraints.from_brief(brief,s).validate(plan)
             self._validate_plan(plan,paths,s)
-            if plan.kind=="ppt" and len(plan.slides)!=brief["page_count"]:
-                failure(502, "AI 大纲页数不符合要求，请重新整理需求")
-            if plan.kind=="psd" and len(plan.layers)+1>brief["layer_count"]:
-                failure(502, "AI 拆分图层数超过要求，请减少内容后重试")
             if provider.usage_tokens>job["budget"]:
                 raise StudioProviderError("上游实际用量超出预留预算，请管理员检查限额参数")
             result = {"plan_id":job["plan_id"],"plan":plan.model_dump(),"price":self.price(plan,s),"revision":job["revision"],"expires_in":86400}
         except HTTPException as exc:
             error = str(exc.detail.get("error","方案生成失败")) if isinstance(exc.detail,dict) else "方案生成失败"
-        except StudioProviderError as exc:
+        except (StudioProviderError, DocumentCountError) as exc:
             error = str(exc)
         except Exception:
             error = "方案生成失败，请稍后重试；未扣生成积分"
@@ -199,6 +197,11 @@ class StudioService:
             failure(422,"任务类型与制作方案不符")
         images = self._input_paths(json.loads(saved["images"]))
         self._validate_plan(body.plan,images,s)
+        # Users can edit/delete layers, but cannot bypass the original task's
+        # total-layer allowance through a hand-crafted confirmation request.
+        source = json.loads(saved["request"])
+        if body.plan.kind == "psd" and len(body.plan.layers)+1 > source.get("layer_count",s.max_layers):
+            failure(422,f"确认方案共 {len(body.plan.layers)+1} 层（含背景），超过本次上限 {source['layer_count']} 层")
         price = self.price(body.plan,s)
         if body.expected_price!=price:
             failure(409,"积分价格或页数已变化，请重新确认")
@@ -315,7 +318,7 @@ class StudioService:
                         raise StudioProviderError("AI 未遵守已确认的页面或图层数量")
                     break
                 except StudioProviderError:
-                    if attempt==s.max_retries or provider.output_tokens>=s.task_output_tokens or provider.usage_tokens>=job["budget"]:
+                    if attempt==s.max_retries or not provider.usage_known or provider.output_tokens>=s.task_output_tokens or provider.usage_tokens>=job["budget"]:
                         raise
             result_plan.template_id = confirmed.template_id
             result_plan.fill_background = confirmed.fill_background

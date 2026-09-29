@@ -16,7 +16,7 @@ export function PlanEditor({ plan, change, image, disabled }: { plan: StudioPlan
         <button aria-label={"删除第 " + (i + 1) + " 页"} disabled={plan.slides.length < 2} onClick={() => change({ ...plan, slides: plan.slides.filter((_, n) => i !== n) })}><Trash2 size={15} /></button>
       </div></header>
       <input aria-label={"第 " + (i + 1) + " 页标题"} maxLength={80} value={slide.title} onChange={e => change({ ...plan, slides: plan.slides.map((s, n) => n === i ? { ...s, title: e.target.value } : s) })} />
-      <textarea aria-label={"第 " + (i + 1) + " 页内容"} value={slide.body.join("\n")} onChange={e => change({ ...plan, slides: plan.slides.map((s, n) => n === i ? { ...s, body: e.target.value.split("\n").slice(0, 5) } : s) })} />
+      <textarea aria-label={"第 " + (i + 1) + " 页内容"} value={slide.body.join("\n")} onChange={e => change({ ...plan, slides: plan.slides.map((s, n) => n === i ? { ...s, body: e.target.value.split("\n") } : s) })} />
       <small>一行一个要点，最多 5 条。没有提供的数据请保留“待补充”。</small>
     </article>) : <>
       {image && <div className="doc-layer-map"><img src={image} alt="原图与预计图层范围" /><svg viewBox="0 0 1000 1000" preserveAspectRatio="none" aria-hidden="true">{plan.layers.map((l, i) => <rect key={i} x={l.box[0]} y={l.box[1]} width={l.box[2]} height={l.box[3]} fill={activeLayer === i ? "#6366f133" : "none"} stroke={activeLayer === i ? "#f59e0b" : "#4f46e5"} strokeWidth={4} />)}</svg></div>}

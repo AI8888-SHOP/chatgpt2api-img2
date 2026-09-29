@@ -9,6 +9,7 @@ import httpx
 from PIL import Image
 
 from services.editable_studio_models import DocumentPlan
+from services.editable_studio_constraints import DocumentConstraints, DocumentCountError
 from services.prompt_optimizer_service import get_tokenizer
 
 SYSTEM = """你是文档工作室的内容与视觉分析器，只输出符合提供 JSON Schema 的制作方案。
@@ -44,7 +45,8 @@ class StudioProvider:
             cap = min(cap, s.task_output_tokens-self.output_tokens)
         if cap < 1024:
             raise StudioProviderError("任务 Token 预算已用完，请缩短内容后重试")
-        instruction = SYSTEM + "\nJSON Schema:\n" + json.dumps(DocumentPlan.model_json_schema(), ensure_ascii=False)
+        constraints = DocumentConstraints.from_brief(brief, s, generation)
+        instruction = SYSTEM + "\n" + constraints.instruction() + "\nJSON Schema:\n" + json.dumps(constraints.schema(), ensure_ascii=False)
         text = json.dumps(brief, ensure_ascii=False)
         token_count = sum(len(get_tokenizer("o200k_base").encode(v, disallowed_special=())) for v in (instruction,text)) + 64
         if token_count > s.max_input_tokens:
@@ -69,6 +71,9 @@ class StudioProvider:
         if timeout < 1:
             raise StudioProviderError("任务执行超时")
         known = False
+        # Reserve the full output allowance before sending. Timeout/HTTP/JSON
+        # errors can hide billed output and must not enable unbounded retries.
+        self.output_tokens += cap
         try:
             with self.client_factory(timeout=timeout, follow_redirects=False, trust_env=False) as client:
                 with client.stream("POST", self.base+endpoint, headers={"Authorization":"Bearer "+self.key}, json=payload) as response:
@@ -83,14 +88,12 @@ class StudioProvider:
             usage = data.get("usage") or {}
             inp = usage.get("input_tokens", usage.get("prompt_tokens"))
             out = usage.get("output_tokens", usage.get("completion_tokens"))
-            if isinstance(inp,int) and isinstance(out,int) and inp>=0 and out>=0:
+            if type(inp) is int and type(out) is int and inp>=0 and out>=0:
                 self.usage_tokens += inp+out
-                self.output_tokens += out
+                self.output_tokens += out-cap
                 known = True
                 if out > cap:
                     raise StudioProviderError("上游未遵守输出 Token 上限，请管理员检查接口")
-            else:
-                self.output_tokens += cap
             if s.protocol == "responses":
                 if data.get("status") != "completed":
                     raise StudioProviderError("AI 输出未完成，可能达到 Token 上限，请缩短内容或调整预算")
@@ -104,7 +107,11 @@ class StudioProvider:
                 result = choice["message"]["content"]
             if result.strip().startswith("\u0060\u0060\u0060json") and result.strip().endswith("\u0060\u0060\u0060"):
                 result = result.strip()[7:-3]
-            return DocumentPlan.model_validate_json(result)
+            parsed = json.loads(result)
+            constraints.validate(parsed)
+            return DocumentPlan.model_validate(parsed)
+        except DocumentCountError as exc:
+            raise StudioProviderError(str(exc)) from None
         except StudioProviderError:
             raise
         except (httpx.TimeoutException, TimeoutError):
