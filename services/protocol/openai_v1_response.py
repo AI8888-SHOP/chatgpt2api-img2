@@ -317,7 +317,7 @@ def collect_response(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
     return completed
 
 
-def response_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
+def response_events(body: dict[str, Any], usage_metadata: dict[str, str] | None = None) -> Iterator[dict[str, Any]]:
     if is_text_response_request(body):
         account_pool = str(body.get("account_pool") or "default").strip().lower()
         if account_pool not in {"default", "gptfree"}:
@@ -326,13 +326,15 @@ def response_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
                 detail={"error": "account_pool must be default or gptfree"},
             )
         if account_pool == "gptfree" or is_gptfree_request_model(body.get("model")):
-            yield from gptfree_response_service.stream(body)
+            yield from gptfree_response_service.stream(body, usage_metadata=usage_metadata)
             return
         model, messages = text_response_parts(body)
         key = cache_key(body, messages, stream=bool(body.get("stream")))
+        if usage_metadata is not None:
+            usage_metadata["upstream_name"] = "本地缓存 / 请求合并"
         yield from chat_completion_cache.get_or_compute_stream(
             key,
-            lambda: stream_text_response(text_backend("default"), body, messages),
+            lambda: stream_text_response(text_backend("default", usage_metadata=usage_metadata), body, messages),
         )
         return
 
@@ -355,12 +357,13 @@ def response_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
         quality=str(tool.get("quality") or "auto"),
         response_format="b64_json",
         images=images,
+        usage_metadata=usage_metadata,
     ))
     yield from stream_image_response(image_outputs, prompt, model, input_image_tokens, tool.get("size"), str(tool.get("quality") or "auto"))
 
 
-def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
-    events = response_events(body)
+def handle(body: dict[str, Any], *, usage_metadata: dict[str, str] | None = None) -> dict[str, Any] | Iterator[dict[str, Any]]:
+    events = response_events(body, usage_metadata)
     if body.get("stream"):
         return events
     return collect_response(events)

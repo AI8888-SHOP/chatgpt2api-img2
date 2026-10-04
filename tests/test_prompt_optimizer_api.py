@@ -24,7 +24,7 @@ class OptimizerEndpointTests(unittest.TestCase):
             "enabled": True, "base_url": "https://optimizer.example/v1",
             "api_key": "test-hidden-credential", "model": "test-model",
         }})
-        self.user = SimpleNamespace(id="stable-user-id", created_at=0, remaining=lambda: 10)
+        self.user = SimpleNamespace(id="stable-user-id", email="test@example.test", created_at=0, remaining=lambda: 10)
         for mock in (patch.object(api_module, "config", self.store), patch.object(api_module, "log_user_usage"), patch.object(api_module, "init_default_admin_key")):
             mock.start()
             self.addCleanup(mock.stop)
@@ -82,6 +82,8 @@ class OptimizerEndpointTests(unittest.TestCase):
             second = client.post("/v1/image-prompts/optimize", json={"prompt": "猫"}, headers={"Authorization": "Bearer usr_second"})
             self.assertEqual(first.status_code, 200)
             self.assertEqual(first.json()["optimized_prompt"], "猫，柔和光线")
+            self.assertEqual(api_module.log_user_usage.call_args.kwargs["upstream_name"], "提示词优化独立 API")
+            self.assertNotIn("upstream_name", first.json())
             self.assertEqual(second.status_code, 429)
             self.assertEqual(len(calls), 1)
         finally:

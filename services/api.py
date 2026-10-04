@@ -610,6 +610,7 @@ def log_user_usage(
     started_at: float,
     error: str = "",
     usage_amount: int = 0,
+    upstream_name: str = "",
 ) -> None:
     usage_service.log(UsageRecord.create(
         api_key=user.id,
@@ -620,6 +621,7 @@ def log_user_usage(
         status=status,
         error=error,
         duration_ms=int((datetime.now().timestamp() - started_at) * 1000),
+        upstream_name=upstream_name,
     ))
 
 
@@ -629,6 +631,7 @@ def build_image_cache_metadata(user, *, action: str, model: str = "") -> dict[st
         "api_key": f"{user.id[:12]}***",
         "api_key_name": str(user.email or ""),
         "model": model,
+        "upstream_name": "未调用上游",
     }
 
 
@@ -674,7 +677,7 @@ def _is_iterator_result(value: object) -> bool:
     return hasattr(value, "__iter__") and not isinstance(value, (dict, list, str, bytes, bytearray))
 
 
-def _settle_protocol_success(user, reservation: dict[str, object], *, action: str, prompt: str, model: str, started_at: float, amount: int) -> None:
+def _settle_protocol_success(user, reservation: dict[str, object], *, action: str, prompt: str, model: str, started_at: float, amount: int, upstream_name: str = "") -> None:
     usage_amount = settle_user_quota_reservation(reservation, amount, action=action, model=model)
     log_user_usage(
         user,
@@ -684,10 +687,11 @@ def _settle_protocol_success(user, reservation: dict[str, object], *, action: st
         status="success",
         started_at=started_at,
         usage_amount=usage_amount,
+        upstream_name=upstream_name,
     )
 
 
-def _refund_protocol_failure(user, reservation: dict[str, object], *, action: str, prompt: str, model: str, started_at: float, error: object) -> None:
+def _refund_protocol_failure(user, reservation: dict[str, object], *, action: str, prompt: str, model: str, started_at: float, error: object, upstream_name: str = "") -> None:
     message = str(error or "")
     refund_user_quota_reservation(reservation, action=action, model=model, error=message)
     log_user_usage(
@@ -698,6 +702,7 @@ def _refund_protocol_failure(user, reservation: dict[str, object], *, action: st
         status="failed",
         started_at=started_at,
         error=message,
+        upstream_name=upstream_name,
     )
 
 
@@ -715,13 +720,14 @@ async def _call_openai_protocol(
     if prompt:
         await run_in_threadpool(check_request, prompt)
     reservation = reserve_user_quota(user, charge_amount, action=action, model=model)
+    usage_metadata = build_image_cache_metadata(user, action=action, model=model)
     try:
-        result = await run_in_threadpool(handler, payload)
+        result = await run_in_threadpool(handler, payload, usage_metadata=usage_metadata)
     except HTTPException as exc:
-        _refund_protocol_failure(user, reservation, action=action, prompt=prompt, model=model, started_at=started_at, error=exc.detail)
+        _refund_protocol_failure(user, reservation, action=action, prompt=prompt, model=model, started_at=started_at, error=exc.detail, upstream_name=usage_metadata["upstream_name"])
         raise
     except Exception as exc:
-        _refund_protocol_failure(user, reservation, action=action, prompt=prompt, model=model, started_at=started_at, error=exc)
+        _refund_protocol_failure(user, reservation, action=action, prompt=prompt, model=model, started_at=started_at, error=exc, upstream_name=usage_metadata["upstream_name"])
         raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
 
     if _is_iterator_result(result):
@@ -730,9 +736,9 @@ async def _call_openai_protocol(
             try:
                 for item in result:
                     yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
-                _settle_protocol_success(user, reservation, action=action, prompt=prompt, model=model, started_at=started_at, amount=charge_amount)
+                _settle_protocol_success(user, reservation, action=action, prompt=prompt, model=model, started_at=started_at, amount=charge_amount, upstream_name=usage_metadata["upstream_name"])
             except Exception as exc:
-                _refund_protocol_failure(user, reservation, action=action, prompt=prompt, model=model, started_at=started_at, error=exc)
+                _refund_protocol_failure(user, reservation, action=action, prompt=prompt, model=model, started_at=started_at, error=exc, upstream_name=usage_metadata["upstream_name"])
                 payload = {"error": {"message": str(exc), "type": exc.__class__.__name__}}
                 yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
             yield "data: [DONE]\n\n"
@@ -740,7 +746,7 @@ async def _call_openai_protocol(
         return StreamingResponse(stream(), media_type="text/event-stream")
 
     amount = charge_amount if isinstance(result, dict) else 0
-    _settle_protocol_success(user, reservation, action=action, prompt=prompt, model=model, started_at=started_at, amount=amount)
+    _settle_protocol_success(user, reservation, action=action, prompt=prompt, model=model, started_at=started_at, amount=amount, upstream_name=usage_metadata["upstream_name"])
     return result
 
 
@@ -1564,6 +1570,7 @@ def create_app() -> FastAPI:
 
     def run_generation_job(job_id: str, api_key, body: ImageGenerationRequest) -> None:
         start_time = datetime.now().timestamp()
+        usage_metadata = build_image_cache_metadata(api_key, action="image_generate", model=body.model)
         job = _get_image_job(job_id) or {}
         reservation = {"id": job.get("reservation_id") or "", "amount": int(job.get("reserved_amount") or body.n)}
         _update_image_job(job_id, status="running", can_resume=False, progress="running", progress_text=_image_progress_text("running"))
@@ -1572,7 +1579,7 @@ def create_app() -> FastAPI:
                 body.prompt,
                 body.model,
                 body.n,
-                build_image_cache_metadata(api_key, action="image_generate", model=body.model),
+                usage_metadata,
                 quality=body.quality,
                 size=body.size,
                 output_format=body.output_format,
@@ -1593,6 +1600,7 @@ def create_app() -> FastAPI:
                 model=body.model,
                 status="success",
                 started_at=start_time,
+                upstream_name=usage_metadata["upstream_name"],
                 usage_amount=usage_amount,
             )
             _update_image_job(job_id, status="success", result=result, error="", can_resume=False, progress="success", progress_text=_image_progress_text("success"))
@@ -1605,6 +1613,7 @@ def create_app() -> FastAPI:
                 model=body.model,
                 status="failed",
                 started_at=start_time,
+                upstream_name=usage_metadata["upstream_name"],
                 error=str(exc),
             )
             conversation_id = str(getattr(exc, "conversation_id", "") or "")
@@ -1633,12 +1642,14 @@ def create_app() -> FastAPI:
                 model=body.model,
                 status="failed",
                 started_at=start_time,
+                upstream_name=usage_metadata["upstream_name"],
                 error=str(exc),
             )
             _update_image_job(job_id, status="error", error=str(exc), can_resume=False, progress="error", progress_text=_image_progress_text("error"))
 
     def run_edit_job(job_id: str, api_key, prompt: str, images: list[tuple[bytes, str, str]], model: str, n: int) -> None:
         start_time = datetime.now().timestamp()
+        usage_metadata = build_image_cache_metadata(api_key, action="image_edit", model=model)
         job = _get_image_job(job_id) or {}
         reservation = {"id": job.get("reservation_id") or "", "amount": int(job.get("reserved_amount") or n)}
         _update_image_job(job_id, status="running", can_resume=False, progress="running", progress_text=_image_progress_text("running"))
@@ -1648,7 +1659,7 @@ def create_app() -> FastAPI:
                 images,
                 model,
                 n,
-                build_image_cache_metadata(api_key, action="image_edit", model=model),
+                usage_metadata,
                 progress_callback=lambda step: _update_image_job_progress(job_id, step),
             )
             usage_amount = settle_user_quota_reservation(
@@ -1664,6 +1675,7 @@ def create_app() -> FastAPI:
                 model=model,
                 status="success",
                 started_at=start_time,
+                upstream_name=usage_metadata["upstream_name"],
                 usage_amount=usage_amount,
             )
             _update_image_job(job_id, status="success", result=result, error="", can_resume=False, progress="success", progress_text=_image_progress_text("success"))
@@ -1676,6 +1688,7 @@ def create_app() -> FastAPI:
                 model=model,
                 status="failed",
                 started_at=start_time,
+                upstream_name=usage_metadata["upstream_name"],
                 error=str(exc),
             )
             conversation_id = str(getattr(exc, "conversation_id", "") or "")
@@ -1704,6 +1717,7 @@ def create_app() -> FastAPI:
                 model=model,
                 status="failed",
                 started_at=start_time,
+                upstream_name=usage_metadata["upstream_name"],
                 error=str(exc),
             )
             _update_image_job(job_id, status="error", error=str(exc), can_resume=False, progress="error", progress_text=_image_progress_text("error"))
@@ -1717,6 +1731,7 @@ def create_app() -> FastAPI:
         conversation_id = str(job.get("conversation_id") or "")
         start_time = datetime.now().timestamp()
         reservation: dict[str, object] = {"id": "", "amount": 0}
+        usage_metadata = build_image_cache_metadata(api_key, action="image_resume_poll", model=model)
 
         _update_image_job(job_id, status="running", error="", can_resume=False, progress="polling_image_result", progress_text=_image_progress_text("polling_image_result"))
         try:
@@ -1727,7 +1742,7 @@ def create_app() -> FastAPI:
                 conversation_id,
                 prompt=prompt,
                 model=model,
-                metadata=build_image_cache_metadata(api_key, action="image_resume_poll", model=model),
+                metadata=usage_metadata,
                 timeout_secs=extra_timeout_secs,
                 progress_callback=lambda step: _update_image_job_progress(job_id, step),
             )
@@ -1744,6 +1759,7 @@ def create_app() -> FastAPI:
                 model=model,
                 status="success",
                 started_at=start_time,
+                upstream_name=usage_metadata["upstream_name"],
                 usage_amount=usage_amount,
             )
             _update_image_job(
@@ -1764,6 +1780,7 @@ def create_app() -> FastAPI:
                 model=model,
                 status="failed",
                 started_at=start_time,
+                upstream_name=usage_metadata["upstream_name"],
                 error=str(exc),
             )
             still_timeout = "超时" in str(exc)
@@ -1879,13 +1896,14 @@ def create_app() -> FastAPI:
         if token.startswith("usr_"):
             body.model = require_frontend_image_model(body.model)
         reservation = reserve_user_quota(api_key, body.n, action="image_generate", model=body.model)
+        usage_metadata = build_image_cache_metadata(api_key, action="image_generate", model=body.model)
         try:
             result = await run_in_threadpool(
                 chatgpt_service.generate_with_pool,
                 body.prompt,
                 body.model,
                 body.n,
-                build_image_cache_metadata(api_key, action="image_generate", model=body.model),
+                usage_metadata,
                 quality=body.quality,
                 size=body.size,
                 output_format=body.output_format,
@@ -1905,6 +1923,7 @@ def create_app() -> FastAPI:
                 model=body.model,
                 status="success",
                 started_at=start_time,
+                upstream_name=usage_metadata["upstream_name"],
                 usage_amount=usage_amount,
             )
             return result
@@ -1917,6 +1936,7 @@ def create_app() -> FastAPI:
                 model=body.model,
                 status="failed",
                 started_at=start_time,
+                upstream_name=usage_metadata["upstream_name"],
                 error=str(exc),
             )
             raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
@@ -1929,6 +1949,7 @@ def create_app() -> FastAPI:
                 model=body.model,
                 status="failed",
                 started_at=start_time,
+                upstream_name=usage_metadata["upstream_name"],
                 error=str(exc),
             )
             raise
@@ -1962,6 +1983,7 @@ def create_app() -> FastAPI:
             images.append((image_data, file_name, mime_type))
 
         reservation = reserve_user_quota(api_key, n, action="image_edit", model=model)
+        usage_metadata = build_image_cache_metadata(api_key, action="image_edit", model=model)
         try:
             result = await run_in_threadpool(
                 chatgpt_service.edit_with_pool,
@@ -1969,7 +1991,7 @@ def create_app() -> FastAPI:
                 images,
                 model,
                 n,
-                build_image_cache_metadata(api_key, action="image_edit", model=model),
+                usage_metadata,
             )
             usage_amount = settle_user_quota_reservation(
                 reservation,
@@ -1984,6 +2006,7 @@ def create_app() -> FastAPI:
                 model=model,
                 status="success",
                 started_at=start_time,
+                upstream_name=usage_metadata["upstream_name"],
                 usage_amount=usage_amount,
             )
             return result
@@ -1996,6 +2019,7 @@ def create_app() -> FastAPI:
                 model=model,
                 status="failed",
                 started_at=start_time,
+                upstream_name=usage_metadata["upstream_name"],
                 error=str(exc),
             )
             raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
@@ -2008,6 +2032,7 @@ def create_app() -> FastAPI:
                 model=model,
                 status="failed",
                 started_at=start_time,
+                upstream_name=usage_metadata["upstream_name"],
                 error=str(exc),
             )
             raise
@@ -2120,7 +2145,7 @@ def create_app() -> FastAPI:
                 base_url=str(request.base_url).rstrip("/"),
                 charged_amount=charge_amount,
             )
-            log_user_usage(api_key, action="psd_generation", prompt=prompt, model="gpt-5-5-thinking", status="success", started_at=datetime.now().timestamp(), usage_amount=charge_amount)
+            log_user_usage(api_key, action="psd_generation", prompt=prompt, model="gpt-5-5-thinking", status="success", started_at=datetime.now().timestamp(), usage_amount=charge_amount, upstream_name="ChatGPT 账号池（任务提交）")
             return result
         except HTTPException as exc:
             if charge_amount > 0:
@@ -2152,8 +2177,9 @@ def create_app() -> FastAPI:
         prompt = str(body.prompt or "").strip()
         settings = config.get_prompt_optimizer_settings()
         model = settings.model
+        usage_metadata = build_image_cache_metadata(api_key, action="image_prompt_optimize", model=model)
         try:
-            result = await prompt_optimizer.optimize(api_key, prompt, settings)
+            result = await prompt_optimizer.optimize(api_key, prompt, settings, usage_metadata=usage_metadata)
             log_user_usage(
                 api_key,
                 action="image_prompt_optimize",
@@ -2161,6 +2187,7 @@ def create_app() -> FastAPI:
                 model=model,
                 status="success",
                 started_at=start_time,
+                upstream_name=usage_metadata["upstream_name"],
             )
             return result
         except HTTPException as exc:
@@ -2174,6 +2201,7 @@ def create_app() -> FastAPI:
                 model=model,
                 status="failed",
                 started_at=start_time,
+                upstream_name=usage_metadata["upstream_name"],
                 error=str(exc.detail),
             )
             raise

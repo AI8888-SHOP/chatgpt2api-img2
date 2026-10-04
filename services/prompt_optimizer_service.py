@@ -156,7 +156,7 @@ class PromptOptimizerService:
         self.limits = limits
         self.client_factory = client_factory
 
-    async def optimize(self, user, prompt: str, settings: PromptOptimizerSettings, *, purpose: Literal["image", "ppt", "psd"] = "image") -> dict:
+    async def optimize(self, user, prompt: str, settings: PromptOptimizerSettings, *, purpose: Literal["image", "ppt", "psd"] = "image", usage_metadata: dict[str, str] | None = None) -> dict:
         system_prompt = SYSTEM_PROMPT if purpose == "image" else REQUIREMENT_PROMPTS[purpose]
         if not settings.enabled:
             raise HTTPException(503, detail={"error": "提示词优化尚未启用，请联系管理员配置独立 API"})
@@ -186,6 +186,8 @@ class PromptOptimizerService:
                 url += "/chat/completions"
             async with asyncio.timeout(settings.timeout_seconds):
                 async with self.client_factory(timeout=settings.timeout_seconds, follow_redirects=False, trust_env=False) as client:
+                    if usage_metadata is not None:
+                        usage_metadata["upstream_name"] = "提示词优化独立 API"
                     async with client.stream("POST", url, headers={"Authorization": f"Bearer {settings.api_key}"}, json=payload) as response:
                         if response.status_code != 200:
                             raise HTTPException(502, detail={"error": "优化服务暂不可用，请稍后重试或联系管理员检查配置"})

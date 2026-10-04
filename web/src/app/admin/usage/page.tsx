@@ -181,12 +181,12 @@ export default function AdminUsagePage() {
       </div>
 
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(320px,0.42fr)]">
-        <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
+        <Card className="min-w-0 rounded-2xl border-white/80 bg-white/90 shadow-sm">
           <CardContent className="space-y-4 p-5">
             <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
               <div>
                 <h2 className="text-lg font-semibold tracking-tight">调用明细</h2>
-                <p className="text-sm text-stone-500">当前筛选成功率 {successRate}。</p>
+                <p className="text-sm text-stone-500">当前筛选成功率 {successRate}。上游显示最后调用的配置名称，历史缺失项显示“未记录”。</p>
               </div>
               <div className="flex flex-wrap gap-2">
                 <div className="relative min-w-[260px]">
@@ -238,7 +238,7 @@ export default function AdminUsagePage() {
             ) : (
               <div className="overflow-hidden rounded-xl border border-stone-200 bg-white">
                 <div className="overflow-x-auto">
-                  <table className="min-w-full text-left text-sm">
+                  <table className="w-full min-w-[960px] text-left text-sm">
                     <thead className="bg-stone-50 text-xs text-stone-500">
                       <tr>
                         <th className="px-3 py-2.5 font-medium">状态</th>
@@ -246,6 +246,7 @@ export default function AdminUsagePage() {
                         <th className="px-3 py-2.5 font-medium">密钥</th>
                         <th className="px-3 py-2.5 font-medium">提示词</th>
                         <th className="px-3 py-2.5 font-medium">模型</th>
+                        <th className="px-3 py-2.5 font-medium">上游</th>
                         <th className="px-3 py-2.5 font-medium">耗时</th>
                         <th className="px-3 py-2.5 font-medium">时间</th>
                       </tr>
@@ -268,6 +269,7 @@ export default function AdminUsagePage() {
                             {record.error ? <div className="mt-1 max-w-[360px] line-clamp-2 text-xs text-rose-500">{record.error}</div> : null}
                           </td>
                           <td className="px-3 py-2.5">{record.model || "-"}</td>
+                          <td className="px-3 py-2.5"><div className="min-w-24 max-w-48 break-words" title={record.upstream_name || undefined}>{record.upstream_name || "未记录"}</div></td>
                           <td className="px-3 py-2.5">{record.duration_ms}ms</td>
                           <td className="px-3 py-2.5">{formatTime(record.timestamp)}</td>
                         </tr>

@@ -334,6 +334,7 @@ class ConversationRequest:
     deadline: float | None = None
     timeout_label_secs: float | None = None
     started_at_epoch: float | None = None
+    usage_metadata: dict[str, str] | None = None
 
 
 def _default_image_timeout_secs() -> float:
@@ -748,10 +749,14 @@ def conversation_events(
     yield from iter_conversation_payloads(payloads, history_text, history_messages)
 
 
-def text_backend(source_type: str = "default") -> OpenAIBackendAPI:
-    return OpenAIBackendAPI(
-        access_token=account_service.get_text_access_token(source_type=source_type)
-    )
+def text_backend(source_type: str = "default", *, usage_metadata: dict[str, str] | None = None) -> OpenAIBackendAPI:
+    if usage_metadata is not None:
+        usage_metadata["upstream_name"] = "未调用上游"
+    token = account_service.get_text_access_token(source_type=source_type)
+    backend = OpenAIBackendAPI(access_token=token)
+    if usage_metadata is not None and token:
+        usage_metadata["upstream_name"] = "ChatGPT 账号池"
+    return backend
 
 
 def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) -> Iterator[str]:
@@ -1368,6 +1373,8 @@ def _generate_single_image(
         })
         try:
             backend = OpenAIBackendAPI(access_token=token)
+            if request.usage_metadata is not None:
+                request.usage_metadata["upstream_name"] = "ChatGPT 账号池"
             backend.image_request_deadline = request.deadline
             backend.image_request_timeout_label_secs = request.timeout_label_secs
             if request.progress_callback:

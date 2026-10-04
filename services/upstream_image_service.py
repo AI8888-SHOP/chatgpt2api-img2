@@ -246,6 +246,10 @@ def generate_image_upstream(
         raise ImageGenerationError("prompt is required")
 
     upstream = _choose_upstream(model)
+    # This request owns metadata. Update it on every attempt so usage records
+    # retain the final selected upstream even when the request raises.
+    if metadata is not None:
+        metadata["upstream_name"] = str(upstream.get("name") or "未命名上游")[:200]
     upstream_model = str(upstream.get("model") or "gpt-image-2")
     record_metadata = {
         **(metadata or {}),
@@ -338,6 +342,8 @@ def edit_image_upstream(
         raise ImageGenerationError("image is required")
 
     upstream = _choose_upstream(model)
+    if metadata is not None:
+        metadata["upstream_name"] = str(upstream.get("name") or "未命名上游")[:200]
     configured_model = str(upstream.get("model") or "gpt-image-2")
     upstream_model = GROK_IMAGE_EDIT_MODEL if configured_model == GROK_IMAGE_MODEL else configured_model
     record_metadata = {

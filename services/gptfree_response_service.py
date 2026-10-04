@@ -65,7 +65,7 @@ def _upstream_body(body: dict[str, Any]) -> dict[str, Any]:
 
 
 class GptFreeResponseService:
-    def stream(self, body: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    def stream(self, body: dict[str, Any], *, usage_metadata: dict[str, str] | None = None) -> Iterator[dict[str, Any]]:
         attempted_tokens: set[str] = set()
         last_error: Exception | None = None
         for _attempt in range(3):
@@ -84,6 +84,8 @@ class GptFreeResponseService:
                 continue
             emitted = False
             try:
+                if usage_metadata is not None:
+                    usage_metadata["upstream_name"] = "GPTFree 账号池"
                 for event in self._stream_account(body, account, identity_id):
                     emitted = True
                     yield event

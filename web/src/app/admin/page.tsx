@@ -271,7 +271,7 @@ export default function AdminDashboardPage() {
               <p className="text-sm text-stone-500">最近 8 条图片相关请求。</p>
             </div>
             <Button variant="outline" className="rounded-xl border-stone-200 bg-white" asChild>
-              <Link href="/admin/keys">查看用量</Link>
+              <Link href="/admin/usage">查看用量</Link>
             </Button>
           </div>
           {recentRecords.length === 0 ? (
@@ -279,13 +279,14 @@ export default function AdminDashboardPage() {
           ) : (
             <div className="overflow-hidden rounded-xl border border-stone-200 bg-white">
               <div className="overflow-x-auto">
-                <table className="min-w-full text-left text-sm">
+                  <table className="w-full min-w-[800px] text-left text-sm">
                   <thead className="bg-stone-50 text-xs text-stone-500">
                     <tr>
                       <th className="px-3 py-2.5 font-medium">状态</th>
                       <th className="px-3 py-2.5 font-medium">类型</th>
                       <th className="px-3 py-2.5 font-medium">密钥</th>
                       <th className="px-3 py-2.5 font-medium">模型</th>
+                      <th className="px-3 py-2.5 font-medium">上游</th>
                       <th className="px-3 py-2.5 font-medium">耗时</th>
                       <th className="px-3 py-2.5 font-medium">时间</th>
                     </tr>
@@ -301,6 +302,7 @@ export default function AdminDashboardPage() {
                         <td className="px-3 py-2.5">{formatAction(record.action)}</td>
                         <td className="px-3 py-2.5">{record.api_key_name || record.api_key || "-"}</td>
                         <td className="px-3 py-2.5">{record.model || "-"}</td>
+                        <td className="px-3 py-2.5"><div className="min-w-24 max-w-48 break-words" title={record.upstream_name || undefined}>{record.upstream_name || "未记录"}</div></td>
                         <td className="px-3 py-2.5">{record.duration_ms}ms</td>
                         <td className="px-3 py-2.5">{formatTime(record.timestamp)}</td>
                       </tr>

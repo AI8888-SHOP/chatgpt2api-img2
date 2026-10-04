@@ -145,6 +145,7 @@ def _gptfree_response_input(messages: list[dict[str, Any]]) -> list[dict[str, An
 def stream_gptfree_chat_completion(
     body: dict[str, Any],
     messages: list[dict[str, Any]],
+    usage_metadata: dict[str, str] | None = None,
 ) -> Iterator[dict[str, Any]]:
     model = str(body.get("model") or "gptfree")
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
@@ -166,7 +167,7 @@ def stream_gptfree_chat_completion(
             response_body["reasoning"] = {
                 "effort": "xhigh" if effort == "extended" else effort
             }
-    for event in gptfree_response_service.stream(response_body):
+    for event in gptfree_response_service.stream(response_body, usage_metadata=usage_metadata):
         if event.get("type") != "response.output_text.delta":
             continue
         delta = str(event.get("delta") or "")
@@ -238,7 +239,7 @@ def image_result_content(result: dict[str, Any]) -> str:
     return str(result.get("message") or "Image generation completed.")
 
 
-def image_chat_response(body: dict[str, Any]) -> dict[str, Any]:
+def image_chat_response(body: dict[str, Any], usage_metadata: dict[str, str] | None = None) -> dict[str, Any]:
     model, prompt, n, images = chat_image_args(body)
     result = collect_image_outputs(stream_image_outputs_with_pool(ConversationRequest(
         prompt=prompt,
@@ -246,6 +247,7 @@ def image_chat_response(body: dict[str, Any]) -> dict[str, Any]:
         n=n,
         response_format="b64_json",
         images=encode_images(images) or None,
+        usage_metadata=usage_metadata,
     )))
     response = completion_response(model, image_result_content(result), int(result.get("created") or 0) or None)
     usage = image_usage(
@@ -257,7 +259,7 @@ def image_chat_response(body: dict[str, Any]) -> dict[str, Any]:
     return response
 
 
-def image_chat_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
+def image_chat_events(body: dict[str, Any], usage_metadata: dict[str, str] | None = None) -> Iterator[dict[str, Any]]:
     model, prompt, n, images = chat_image_args(body)
     image_outputs = stream_image_outputs_with_pool(ConversationRequest(
         prompt=prompt,
@@ -265,6 +267,7 @@ def image_chat_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
         n=n,
         response_format="b64_json",
         images=encode_images(images) or None,
+        usage_metadata=usage_metadata,
     ))
     yield from stream_image_chat_completion(image_outputs, model)
 
@@ -295,7 +298,7 @@ def stream_image_chat_completion(image_outputs: Iterable[ImageOutput], model: st
     yield completion_chunk(model, {}, "stop", completion_id, created)
 
 
-def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
+def handle(body: dict[str, Any], *, usage_metadata: dict[str, str] | None = None) -> dict[str, Any] | Iterator[dict[str, Any]]:
     account_pool = str(body.get("account_pool") or "default").strip().lower()
     if account_pool not in {"default", "gptfree"}:
         raise HTTPException(
@@ -304,28 +307,32 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
         )
     if body.get("stream"):
         if is_image_chat_request(body):
-            return image_chat_events(body)
+            return image_chat_events(body, usage_metadata)
         model, messages = text_chat_parts(body)
         if account_pool == "gptfree" or is_gptfree_request_model(model):
-            return stream_gptfree_chat_completion(body, messages)
+            return stream_gptfree_chat_completion(body, messages, usage_metadata)
         key = cache_key(body, messages, stream=True)
+        if usage_metadata is not None:
+            usage_metadata["upstream_name"] = "本地缓存 / 请求合并"
         return chat_completion_cache.get_or_compute_stream(
             key,
-            lambda: stream_text_chat_completion(text_backend("default"), messages, model),
+            lambda: stream_text_chat_completion(text_backend("default", usage_metadata=usage_metadata), messages, model),
         )
     if is_image_chat_request(body):
-        return image_chat_response(body)
+        return image_chat_response(body, usage_metadata)
     model, messages = text_chat_parts(body)
     if account_pool == "gptfree" or is_gptfree_request_model(model):
-        content = collect_chat_content(stream_gptfree_chat_completion(body, messages))
+        content = collect_chat_content(stream_gptfree_chat_completion(body, messages, usage_metadata))
         return completion_response(model, content, messages=messages)
     key = cache_key(body, messages, stream=False)
+    if usage_metadata is not None:
+        usage_metadata["upstream_name"] = "本地缓存 / 请求合并"
     return chat_completion_cache.get_or_compute_response(
         key,
         lambda: completion_response(
             model,
             collect_text(
-                text_backend("default"),
+                text_backend("default", usage_metadata=usage_metadata),
                 ConversationRequest(model=model, messages=messages),
             ),
             messages=messages,

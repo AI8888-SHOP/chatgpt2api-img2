@@ -382,6 +382,8 @@ class ChatGPTService:
                 except Exception as retry_exc:
                     raise ImageGenerationError(_public_image_error(str(retry_exc or exc))) from retry_exc
             try:
+                if metadata is not None:
+                    metadata["upstream_name"] = "ChatGPT 账号池"
                 if config.image_conduit_flow_enabled:
                     result = generate_image_result_conduit(
                         access_token,
@@ -507,6 +509,8 @@ class ChatGPTService:
                     raise ImageGenerationError(_public_image_error(str(retry_exc or exc))) from retry_exc
             try:
                 image_editor = edit_image_result_conduit if config.image_conduit_flow_enabled else edit_image_result
+                if metadata is not None:
+                    metadata["upstream_name"] = "ChatGPT 账号池"
                 result = image_editor(
                     access_token,
                     prompt,
@@ -781,6 +785,8 @@ class ChatGPTService:
         progress_callback: Callable[[str], None] | None = None,
     ) -> dict:
         try:
+            if metadata is not None:
+                metadata["upstream_name"] = "ChatGPT 账号池"
             return resume_image_poll_result(
                 access_token,
                 device_id,

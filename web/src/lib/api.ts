@@ -1031,6 +1031,7 @@ export type UsageRecordItem = {
   action: string;
   prompt: string;
   model: string;
+  upstream_name?: string;
   status: string;
   error: string;
   duration_ms: number;

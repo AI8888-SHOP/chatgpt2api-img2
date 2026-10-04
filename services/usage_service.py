@@ -27,10 +27,12 @@ class UsageRecord:
     error: str = ""  # 错误信息
     duration_ms: int = 0  # 耗时
     timestamp: int = 0
+    upstream_name: str = ""
 
     @classmethod
     def create(cls, api_key: str, api_key_name: str, action: str, prompt: str, 
-               model: str, status: str, error: str = "", duration_ms: int = 0) -> "UsageRecord":
+               model: str, status: str, error: str = "", duration_ms: int = 0,
+               upstream_name: str = "") -> "UsageRecord":
         return cls(
             id=f"{int(time.time() * 1000)}_{api_key[:8]}",
             api_key=api_key[:12] + "***",  # 脱敏
@@ -42,6 +44,7 @@ class UsageRecord:
             error=error[:200] if error else "",
             duration_ms=duration_ms,
             timestamp=int(time.time()),
+            upstream_name=str(upstream_name or "").strip()[:200],
         )
 
 
