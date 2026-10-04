@@ -23,6 +23,7 @@ import {
   type ImageJobResult,
   type ImageJobStatus,
   type ImageModel,
+  type ImageModelConfig,
   type QuickPromptConfig,
   optimizeImagePrompt,
 } from "@/lib/api";
@@ -45,11 +46,7 @@ const DEFAULT_IMAGE_MODEL: ImageModel = "gpt-image-2";
 const PSD_REFERENCE_TRANSFER_KEY = "editable-files:incoming-psd-reference";
 
 function normalizeImageModel(value: unknown): ImageModel {
-  return value === "grok-imagine-image" ? value : DEFAULT_IMAGE_MODEL;
-}
-
-function normalizeImageModelForMode(value: unknown): ImageModel {
-  return normalizeImageModel(value);
+  return typeof value === "string" ? value.trim() : "";
 }
 
 function buildConversationTitle(prompt: string) {
@@ -255,7 +252,11 @@ export default function ImagePage() {
   }, []);
   const [imageCount, setImageCount] = useState("1");
   const [imageMode, setImageMode] = useState<ImageConversationMode>("generate");
-  const [imageModel, setImageModel] = useState<ImageModel>(DEFAULT_IMAGE_MODEL);
+  const [imageModel, setImageModel] = useState<ImageModel>("");
+  const [availableModels, setAvailableModels] = useState<ImageModelConfig[]>([]);
+  const [defaultModel, setDefaultModel] = useState("");
+  const [modelsLoading, setModelsLoading] = useState(true);
+  const [modelsError, setModelsError] = useState("");
   const [imageQuality, setImageQuality] = useState("auto");
   const [imageSize, setImageSize] = useState("auto");
   const [imageOutputFormat, setImageOutputFormat] = useState("png");
@@ -273,6 +274,13 @@ export default function ImagePage() {
   const [lightboxIndex, setLightboxIndex] = useState(0);
   const [maskEditorImage, setMaskEditorImage] = useState<string | null>(null);
   const [maskEditorIndex, setMaskEditorIndex] = useState<number>(-1);
+
+  const selectAvailableModel = useCallback((model: unknown) => {
+    const requested = normalizeImageModel(model);
+    if (availableModels.some((item) => item.id === requested)) return requested;
+    if (requested) toast.info("原模型已停用，已选择当前默认模型");
+    return defaultModel;
+  }, [availableModels, defaultModel]);
   const [historyCollapsed, setHistoryCollapsed] = useState(false);
   const [mobileHistoryOpen, setMobileHistoryOpen] = useState(false);
   const [isWideLayout, setIsWideLayout] = useState(false);
@@ -397,11 +405,21 @@ export default function ImagePage() {
   useEffect(() => {
     let cancelled = false;
 
+    let revision = 0;
     const loadQuickPrompts = async () => {
+      const currentRevision = ++revision;
+      setModelsLoading(true);
       try {
         const data = await fetchPublicAppConfig();
+        if (!Array.isArray(data.image_models)) throw new Error("模型配置加载失败");
+        const models = data.image_models.filter(item => item.id && item.enabled !== false);
+        const fallback = models.some(item => item.id === data.default_image_model) ? data.default_image_model! : models[0]?.id || "";
         const prompts = Array.isArray(data.quick_prompts) ? data.quick_prompts : [];
-        if (!cancelled) {
+        if (!cancelled && currentRevision === revision) {
+          setAvailableModels(models);
+          setDefaultModel(fallback);
+          setImageModel(current => models.some(item => item.id === current) ? current : fallback);
+          setModelsError(models.length ? "" : "暂无可用模型，请联系管理员开放模型");
           setQuickPrompts(
             prompts
               .map((item, index) => ({
@@ -412,13 +430,26 @@ export default function ImagePage() {
           );
         }
       } catch {
-        if (!cancelled) setQuickPrompts([]);
+        if (!cancelled && currentRevision === revision) {
+          setQuickPrompts([]);
+          setAvailableModels([]);
+          setImageModel("");
+          setDefaultModel("");
+          setModelsError("模型配置加载失败，请刷新重试");
+        }
+      } finally {
+        if (!cancelled && currentRevision === revision) setModelsLoading(false);
       }
     };
 
     void loadQuickPrompts();
+    const reload = () => { void loadQuickPrompts(); };
+    window.addEventListener("focus", reload);
+    window.addEventListener("app:models-updated", reload);
     return () => {
       cancelled = true;
+      window.removeEventListener("focus", reload);
+      window.removeEventListener("app:models-updated", reload);
     };
   }, []);
 
@@ -648,7 +679,7 @@ export default function ImagePage() {
       const mode = conversation.mode === "edit" ? "edit" : "generate";
       setImagePrompt(conversation.prompt);
       setImageMode(mode);
-      setImageModel(normalizeImageModelForMode(conversation.model));
+      setImageModel(selectAvailableModel(conversation.model));
       setImageCount(String(Math.max(1, Math.min(10, conversation.count || 1))));
       setImageQuality(conversation.generationSettings?.quality || "auto");
       setImageSize(conversation.generationSettings?.size || "auto");
@@ -659,7 +690,7 @@ export default function ImagePage() {
       toast.success("已复用输入，提交后将在原对话中继续");
       requestAnimationFrame(() => textareaRef.current?.focus());
     },
-    [applyReferenceImagesToComposer],
+    [applyReferenceImagesToComposer, selectAvailableModel],
   );
 
   const handleUseResultAsReference = useCallback(
@@ -676,7 +707,7 @@ export default function ImagePage() {
         setImageMode("edit");
         applyReferenceImagesToComposer([referenceImage]);
         setImagePrompt(sourceConversation?.prompt || "");
-        setImageModel(normalizeImageModel(sourceConversation?.model));
+        setImageModel(selectAvailableModel(sourceConversation?.model));
         setImageCount("1");
         setImageQuality(sourceConversation?.generationSettings?.quality || "auto");
         setImageSize(sourceConversation?.generationSettings?.size || "auto");
@@ -689,7 +720,7 @@ export default function ImagePage() {
         toast.error(error instanceof Error ? error.message : "读取结果图失败");
       }
     },
-    [applyReferenceImagesToComposer, selectedConversation],
+    [applyReferenceImagesToComposer, selectedConversation, selectAvailableModel],
   );
 
   const handleSplitResultAsPsd = useCallback(async (image: StoredImage, index: number) => {
@@ -868,6 +899,10 @@ export default function ImagePage() {
   }, []);
 
   const handleGenerateImage = useCallback(async () => {
+    if (modelsLoading || !availableModels.some(item => item.id === imageModel)) {
+      toast.error(modelsError || "请选择可用模型");
+      return;
+    }
     const prompt = imagePrompt.trim();
     if (!prompt) {
       toast.error("请输入提示词");
@@ -1010,6 +1045,9 @@ export default function ImagePage() {
     }
   }, [
     imagePrompt,
+    modelsLoading,
+    modelsError,
+    availableModels,
     continuingThreadId,
     imageMode,
     referenceImageFiles,
@@ -1107,6 +1145,9 @@ export default function ImagePage() {
     <ImageComposer
       mode={imageMode}
       model={imageModel}
+      availableModels={availableModels}
+      modelsLoading={modelsLoading}
+      modelsError={modelsError}
       prompt={imagePrompt}
       imageCount={imageCount}
       size={imageSize}

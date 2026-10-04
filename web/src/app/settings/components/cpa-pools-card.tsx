@@ -1,5 +1,7 @@
 "use client";
 
+import { formatUtc8Time } from "@/lib/datetime";
+
 import { Import, LoaderCircle, Pencil, Plus, ServerCog, Trash2 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -120,7 +122,7 @@ export function CPAPoolsCard() {
                               状态 {importJob.status}，已处理 {importJob.completed}/{importJob.total}
                             </div>
                             <div className="truncate text-xs text-stone-400">
-                              任务 {importJob.job_id.slice(0, 8)} · {importJob.created_at}
+                              任务 {importJob.job_id.slice(0, 8)} · {formatUtc8Time(importJob.created_at)}
                             </div>
                           </div>
                           <Badge

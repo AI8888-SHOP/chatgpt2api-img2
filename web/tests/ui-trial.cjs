@@ -32,7 +32,7 @@ const check = (name,value) => {assert.ok(value,name);checks.push(name);};
       if(Object.hasOwn(b,'preference'))trial.preference=b.preference;
      }
      body=trial;
-    }else if(p==='/app-config')body={site_title:'image 绘图',quick_prompts:[]};
+    }else if(p==='/app-config')body={site_title:'image 绘图',quick_prompts:[],image_models:[{id:'gpt-image-2',label:'gpt-image-2'},{id:'grok-imagine-image',label:'grok-imagine-image'}],default_image_model:'gpt-image-2'};
     else if(p==='/v1/key/info')body={remaining:100};
     else if(p==='/v1/image-conversations')body=req.method()==='GET'?{items:rounds}:{success:true,conversation:req.postDataJSON()?.conversation};
     else if(p==='/v1/image-prompts/optimize') {await new Promise(r=>setTimeout(r,600));body={optimized_prompt:'优化后的自然庭院与柔光'};}

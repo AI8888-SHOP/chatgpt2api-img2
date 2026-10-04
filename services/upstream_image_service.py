@@ -52,11 +52,10 @@ def is_upstream_image_model(model: object) -> bool:
     requested = str(model or "").strip().lower()
     if requested in {GROK_IMAGE_MODEL, GROK_IMAGE_EDIT_MODEL}:
         return True
-    # Treat configured enabled image models as upstream routes. This keeps
-    # gpt-image-2 from falling through to the local account pool.
+    # A disabled upstream must not silently fall through to the account pool.
     return any(
         str(item.get("model") or "").strip().lower() == requested
-        for item in config.get_enabled_image_upstreams()
+        for item in config.get_image_upstreams()
     )
 
 

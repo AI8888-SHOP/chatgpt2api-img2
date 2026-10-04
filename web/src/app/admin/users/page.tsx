@@ -1,5 +1,7 @@
 "use client";
 
+import { formatUtc8Time } from "@/lib/datetime";
+
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Eye, KeyRound, LoaderCircle, Plus, RefreshCw, Search, Trash2, UserCog } from "lucide-react";
 import { toast } from "sonner";
@@ -29,7 +31,7 @@ type UserFormMode = "create" | "edit";
 
 function formatTime(timestamp: number) {
   if (!timestamp) return "-";
-  return new Date(timestamp * 1000).toLocaleString("zh-CN");
+  return formatUtc8Time(timestamp);
 }
 
 function formatLedgerReason(reason: string) {
@@ -45,9 +47,7 @@ function formatLedgerReason(reason: string) {
 }
 
 function formatConversationCreatedAt(value: string) {
-  const timestamp = Date.parse(value || "");
-  if (!timestamp) return "-";
-  return new Date(timestamp).toLocaleString("zh-CN");
+  return formatUtc8Time(value);
 }
 
 export default function AdminUsersPage() {

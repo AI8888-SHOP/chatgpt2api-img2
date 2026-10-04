@@ -201,6 +201,41 @@ class ConfigSaveError(RuntimeError):
     pass
 
 
+class ImageModelsConfigError(ValueError):
+    pass
+
+
+DEFAULT_IMAGE_MODELS = [
+    {"id": "gpt-image-2", "label": "gpt-image-2", "enabled": True},
+    {"id": "grok-imagine-image", "label": "grok-imagine-image", "enabled": True},
+]
+
+
+def validate_image_models(items: object, default: object) -> tuple[list[dict], str]:
+    if not isinstance(items, list) or len(items) > 50:
+        raise ImageModelsConfigError("前端模型配置无效：最多设置 50 个模型")
+    normalized, seen = [], set()
+    for item in items:
+        if not isinstance(item, dict):
+            raise ImageModelsConfigError("前端模型配置无效")
+        model_id = str(item.get("id") or "").strip()
+        label = str(item.get("label") or "").strip() or model_id
+        enabled = item.get("enabled", True)
+        if (not model_id or len(model_id) > 128 or model_id.lower() == "auto"
+                or any(c.isspace() or ord(c) < 32 for c in model_id)
+                or model_id.lower() in seen or len(label) > 80 or not isinstance(enabled, bool)):
+            raise ImageModelsConfigError("前端模型配置无效：请检查模型 ID、重复项、名称和启用状态")
+        seen.add(model_id.lower())
+        normalized.append({"id": model_id, "label": label, "enabled": enabled})
+    available = [item["id"] for item in normalized if item["enabled"]]
+    selected = str(default or "").strip()
+    if not selected:
+        selected = available[0] if available else ""
+    if selected and selected not in available:
+        raise ImageModelsConfigError("默认模型必须是已启用的前端模型")
+    return normalized, selected
+
+
 class ConfigStore:
     def __init__(self, path: Path):
         self.path = path
@@ -441,7 +476,22 @@ class ConfigStore:
         data["image_storage"] = self.get_image_storage_settings()
         data["chat_completion_cache"] = self.get_chat_completion_cache_settings()
         data["proxy_runtime"] = self.get_proxy_runtime_settings()
+        data["image_models"] = self.get_image_models()
+        data["default_image_model"] = self.get_default_image_model()
         return data
+
+    def get_image_models(self) -> list[dict]:
+        items, _ = validate_image_models(self.data.get("image_models", DEFAULT_IMAGE_MODELS),
+                                        self.data.get("default_image_model", ""))
+        return items
+
+    def get_default_image_model(self) -> str:
+        _, default = validate_image_models(self.data.get("image_models", DEFAULT_IMAGE_MODELS),
+                                          self.data.get("default_image_model", ""))
+        return default
+
+    def get_public_image_models(self) -> list[dict[str, str]]:
+        return [{"id": item["id"], "label": item["label"]} for item in self.get_image_models() if item["enabled"]]
 
     def get_site_title(self) -> str:
         return str(self.get().get("site_title") or DEFAULT_SITE_TITLE).strip() or DEFAULT_SITE_TITLE
@@ -491,7 +541,7 @@ class ConfigStore:
             "base_url": base_url,
             "api_key": api_key,
             "model": model,
-            "enabled": bool(item.get("enabled", True)),
+            "enabled": _normalize_bool(item.get("enabled"), True),
         }
 
     def get_image_upstreams(self) -> list[dict[str, object]]:
@@ -507,7 +557,7 @@ class ConfigStore:
 
     def get_enabled_image_upstreams(self) -> list[dict[str, object]]:
         items = [item for item in self.get_image_upstreams() if item.get("enabled")]
-        return items or self.get_image_upstreams()
+        return items
 
     def get_image_storage_settings(self) -> dict[str, object]:
         return _normalize_image_storage_settings(self.data.get("image_storage"))
@@ -518,6 +568,12 @@ class ConfigStore:
     def update(self, data: dict[str, object]) -> dict[str, object]:
         previous_data = self.data
         next_data = dict(data or {})
+        models, default = validate_image_models(
+            next_data.get("image_models", self.data.get("image_models", DEFAULT_IMAGE_MODELS)),
+            next_data.get("default_image_model", self.data.get("default_image_model", "")),
+        )
+        next_data["image_models"] = models
+        next_data["default_image_model"] = default
         previous_optimizer = self.data.get("prompt_optimizer") or {}
         previous_studio = self.data.get("editable_studio") or {}
         if "editable_studio" in next_data:

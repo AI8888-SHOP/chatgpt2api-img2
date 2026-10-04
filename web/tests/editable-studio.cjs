@@ -35,7 +35,7 @@ const upload = {name:'reference.png',mimeType:'image/png',buffer:preview};
     if(!api) return url.origin===new URL(base).origin || url.protocol==='data:' ? route.continue() : route.abort();
     let body={};
     if(p==='/v1/user/ui-trial') {if(req.method()==='POST')trial={...trial,...req.postDataJSON()};body=trial;}
-    else if(p==='/app-config')body={site_title:'测试工作室',quick_prompts:[]};
+    else if(p==='/app-config')body={site_title:'测试工作室',quick_prompts:[],image_models:[{id:'gpt-image-2',label:'gpt-image-2'},{id:'grok-imagine-image',label:'grok-imagine-image'}],default_image_model:'gpt-image-2'};
     else if(p==='/v1/key/info')body={remaining:100};
     else if(p==='/v1/editable-studio/config')body={enabled:true,limits,templates,optimization:{enabled:optimizationEnabled,timeout_seconds:30,max_input_tokens:2048,max_output_tokens:512,user_rpm:3,user_daily_requests:30}};
     else if(p==='/v1/editable-studio/requirements/optimize'){

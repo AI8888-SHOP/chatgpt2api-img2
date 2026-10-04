@@ -1,5 +1,7 @@
 "use client";
 
+import { formatUtc8Time } from "@/lib/datetime";
+
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   CheckCircle2,
@@ -60,7 +62,7 @@ function formatExpires(item: ApiKeySummary) {
   if (!item.expires_at) {
     return "永不过期";
   }
-  return item.expires_at_str || new Date(item.expires_at * 1000).toLocaleString("zh-CN");
+  return formatUtc8Time(item.expires_at);
 }
 
 export default function AdminKeysPage() {
@@ -320,9 +322,9 @@ export default function AdminKeysPage() {
       "credit_amount",
       "redeemed_status",
       "redeemed_by",
-      "redeemed_at",
-      "created_at",
-      "expires_at",
+      "redeemed_at (UTC+8)",
+      "created_at (UTC+8)",
+      "expires_at (UTC+8)",
     ];
     const escapeCell = (value: unknown) => `"${String(value ?? "").replaceAll('"', '""')}"`;
     const rows = filteredKeys.map((item) => [
@@ -338,8 +340,8 @@ export default function AdminKeysPage() {
       formatCreditAmount(item),
       formatRemaining(item),
       item.redeemed_by || "",
-      item.redeemed_at || "",
-      item.created_at_str || item.created_at,
+      item.redeemed_at ? formatUtc8Time(item.redeemed_at) : "",
+      formatUtc8Time(item.created_at),
       formatExpires(item),
     ]);
     const csv = [headers.join(","), ...rows.map((row) => row.map(escapeCell).join(","))].join("\n");
@@ -563,10 +565,10 @@ export default function AdminKeysPage() {
                           </td>
                           <td className="px-3 py-2.5 text-xs leading-5 text-stone-600">
                             <div className="max-w-[180px] truncate font-mono">{item.redeemed_by || "—"}</div>
-                            <div>{item.redeemed_at ? new Date(item.redeemed_at * 1000).toLocaleString("zh-CN") : "未兑换"}</div>
+                            <div>{item.redeemed_at ? formatUtc8Time(item.redeemed_at) : "未兑换"}</div>
                           </td>
                           <td className="px-3 py-2.5 text-xs leading-5 text-stone-600">
-                            <div>{item.created_at_str || "—"}</div>
+                            <div>{formatUtc8Time(item.created_at)}</div>
                             <div>{formatExpires(item)}</div>
                           </td>
                           <td className="px-3 py-2.5">

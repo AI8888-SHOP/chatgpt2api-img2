@@ -2,7 +2,8 @@ import { httpRequest } from "@/lib/request";
 
 export type AccountType = "Free" | "Plus" | "Pro" | "Team" | "Enterprise";
 export type AccountStatus = "正常" | "限流" | "异常" | "禁用";
-export type ImageModel = "gpt-image-2" | "grok-imagine-image";
+export type ImageModel = string;
+export type ImageModelConfig = { id: string; label: string; enabled?: boolean };
 
 export type Account = {
   id: string;
@@ -54,6 +55,8 @@ export type SettingsConfig = {
   site_title?: string;
   proxy: string;
   image_upstreams?: ImageUpstreamConfig[];
+  image_models?: ImageModelConfig[];
+  default_image_model?: string;
   image_upstream_cooldown_secs?: number;
   quick_prompts?: QuickPromptConfig[];
   "auth-key"?: string;
@@ -81,6 +84,8 @@ export type PublicAppConfig = {
   site_title: string;
   quick_prompts?: QuickPromptConfig[];
   psd_task_price?: number;
+  image_models?: ImageModelConfig[];
+  default_image_model?: string;
 };
 
 export type PromptOptimizerConfig = {

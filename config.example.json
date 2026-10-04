@@ -2,6 +2,11 @@
   "auth-key": "change-me",
   "refresh_account_interval_minute": 30,
   "proxy": "",
+  "image_models": [
+    { "id": "gpt-image-2", "label": "gpt-image-2", "enabled": true },
+    { "id": "grok-imagine-image", "label": "grok-imagine-image", "enabled": true }
+  ],
+  "default_image_model": "gpt-image-2",
   "image_upstreams": [
     {
       "name": "example",

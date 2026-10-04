@@ -1,5 +1,7 @@
 "use client";
 
+import { formatUtc8Time } from "@/lib/datetime";
+
 import { useEffect, useMemo, useRef, useState } from "react";
 import { HardDrive, Image as ImageIcon, LoaderCircle, RefreshCw, Search, Trash2 } from "lucide-react";
 import { toast } from "sonner";
@@ -31,7 +33,7 @@ function formatDate(value: number) {
   if (!value) {
     return "—";
   }
-  return new Date(value * 1000).toLocaleString("zh-CN");
+  return formatUtc8Time(value);
 }
 
 function formatBytes(bytes: number) {

@@ -1,5 +1,7 @@
 "use client";
 
+import { formatUtc8Time } from "@/lib/datetime";
+
 import { useEffect, useRef, useState } from "react";
 import { ClipboardList, LoaderCircle, RefreshCw, Search } from "lucide-react";
 import { toast } from "sonner";
@@ -29,7 +31,7 @@ const actionOptions = [
 
 function formatTime(timestamp: number) {
   if (!timestamp) return "-";
-  return new Date(timestamp * 1000).toLocaleString("zh-CN");
+  return formatUtc8Time(timestamp);
 }
 
 function formatAction(action: string) {

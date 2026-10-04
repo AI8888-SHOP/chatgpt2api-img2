@@ -1,5 +1,7 @@
 "use client";
 
+import { formatUtc8Time } from "@/lib/datetime";
+
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Eye,
@@ -497,7 +499,7 @@ export function Sub2APIConnections() {
                                     状态 {importJob.status}，已处理 {importJob.completed}/{importJob.total}
                                   </div>
                                   <div className="truncate text-xs text-stone-400">
-                                    任务 {importJob.job_id.slice(0, 8)} · {importJob.created_at}
+                                    任务 {importJob.job_id.slice(0, 8)} · {formatUtc8Time(importJob.created_at)}
                                   </div>
                                 </div>
                                 <Badge
@@ -823,7 +825,7 @@ export function Sub2APIConnections() {
                         </div>
                         <div className="truncate text-xs text-stone-400">
                           id {item.id}
-                          {item.expires_at ? ` · 过期 ${item.expires_at}` : ""}
+                          {item.expires_at ? ` · 过期 ${formatUtc8Time(item.expires_at)}` : ""}
                         </div>
                       </div>
                     </label>

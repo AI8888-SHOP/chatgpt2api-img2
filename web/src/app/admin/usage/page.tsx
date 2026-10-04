@@ -1,5 +1,7 @@
 "use client";
 
+import { formatUtc8Time } from "@/lib/datetime";
+
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
@@ -40,7 +42,7 @@ function formatAction(action: string) {
 
 function formatTime(timestamp: number) {
   if (!timestamp) return "-";
-  return new Date(timestamp * 1000).toLocaleString("zh-CN");
+  return formatUtc8Time(timestamp);
 }
 
 export default function AdminUsagePage() {
@@ -267,7 +269,7 @@ export default function AdminUsagePage() {
                           </td>
                           <td className="px-3 py-2.5">{record.model || "-"}</td>
                           <td className="px-3 py-2.5">{record.duration_ms}ms</td>
-                          <td className="px-3 py-2.5">{record.timestamp_str || formatTime(record.timestamp)}</td>
+                          <td className="px-3 py-2.5">{formatTime(record.timestamp)}</td>
                         </tr>
                       ))}
                     </tbody>

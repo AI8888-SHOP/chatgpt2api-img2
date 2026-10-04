@@ -1223,7 +1223,7 @@ class UserService:
             "id": conversation_id,
             "title": str(conversation.get("title") or "")[:200],
             "prompt": str(conversation.get("prompt") or "")[:MAX_IMAGE_CONVERSATION_PROMPT_CHARS],
-            "model": str(conversation.get("model") or "gpt-image-2")[:80],
+            "model": str(conversation.get("model") or "gpt-image-2")[:128],
             "mode": "edit" if conversation.get("mode") == "edit" else "generate",
             "count": max(1, min(4, int(conversation.get("count") or 1))),
             "createdAt": str(conversation.get("createdAt") or ""),

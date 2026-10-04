@@ -1,5 +1,7 @@
 "use client";
 
+import { formatUtc8Time } from "@/lib/datetime";
+
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AlertTriangle, LoaderCircle, Play, Plus, RotateCcw, Save, Square, Trash2 } from "lucide-react";
 import { toast } from "sonner";
@@ -710,7 +712,7 @@ export default function AdminRegisterPage() {
                   {newLogs.length ? (
                     newLogs.slice(-120).reverse().map((item, index) => (
                       <div key={index} className="break-words">
-                        <span className="text-stone-400">{String(item.time || "")}</span> {String(item.text || "")}
+                        <span className="text-stone-400">{formatUtc8Time(item.time)}</span> {String(item.text || "")}
                       </div>
                     ))
                   ) : (
@@ -762,7 +764,7 @@ export default function AdminRegisterPage() {
                   {gptFreeLogs.length ? (
                     gptFreeLogs.slice(-160).reverse().map((item, index) => (
                       <div key={index} className="break-words">
-                        <span className="text-stone-400">{String(item.time || "")}</span> {String(item.text || "")}
+                        <span className="text-stone-400">{formatUtc8Time(item.time)}</span> {String(item.text || "")}
                       </div>
                     ))
                   ) : (
@@ -795,7 +797,7 @@ export default function AdminRegisterPage() {
             {logs.length ? (
               logs.slice(-200).reverse().map((item, index) => (
                 <div key={index} className="break-words">
-                  <span className="text-stone-400">{String(item.time || "")}</span> {String(item.text || "")}
+                  <span className="text-stone-400">{formatUtc8Time(item.time)}</span> {String(item.text || "")}
                 </div>
               ))
             ) : (

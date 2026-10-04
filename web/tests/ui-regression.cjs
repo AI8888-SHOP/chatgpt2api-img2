@@ -47,7 +47,7 @@ function check(name, ok, detail) {
         if (request.method() === 'OPTIONS') return route.fulfill({ status: 204, headers: { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*', 'access-control-allow-methods': '*' } });
         if (request.method() !== 'GET') writes.push(p);
         let body = {};
-        if (p === '/app-config') body = { site_title: '绘图 UI 测试', quick_prompts: [], registration_enabled: true };
+        if (p === '/app-config') body = { site_title: '绘图 UI 测试', quick_prompts: [], registration_enabled: true, image_models: [{id:'gpt-image-2',label:'gpt-image-2'},{id:'grok-imagine-image',label:'grok-imagine-image'}], default_image_model:'gpt-image-2' };
         else if (p === '/v1/user/ui-trial') body = { trial_id: 'studio-2026-09', assigned_variant: design, variant: design, preference: null, seen_a: true, seen_b: true };
         else if (p === '/v1/key/info') body = { remaining: 100, user: { username: 'UI 测试用户' } };
         else if (p === '/v1/image-conversations') body = request.method() === 'GET' ? { items: conversations } : { success: true };

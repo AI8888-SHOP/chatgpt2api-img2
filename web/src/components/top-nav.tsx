@@ -63,6 +63,7 @@ export function TopNav() {
         </div>
       </div>
       {admin && <nav className="studio-admin-nav" aria-label="后台导航">{adminNavItems.map(item => <Link key={item.href} href={item.href} aria-current={pathname === item.href ? "page" : undefined}>{item.label}</Link>)}</nav>}
+      {admin && <div className="px-4 pb-2 text-xs text-stone-500">后台时间：北京时间 UTC+8</div>}
     </header>
     {!admin && <SideDrawer open={menuOpen} onOpenChange={setMenuOpen} title="工作台菜单">
       <div className="studio-menu">

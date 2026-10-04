@@ -1,4 +1,6 @@
 "use client";
+
+import { formatUtc8Time } from "@/lib/datetime";
 import { useEffect, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { httpRequest } from "@/lib/request";
@@ -31,7 +33,7 @@ export default function UiTrialPage() {
       <div className="trial-comparison">{stats.variants.map(item => <article key={item.variant}><header><span className={"design-dot design-dot-" + item.variant} /><h2>{item.variant === "a" ? "A · 雾白靛蓝" : "B · 石墨青绿"}</h2><span>{item.variant === "a" ? "对话式" : "画布式"}</span></header><dl>{[{ label: "初始分组人数", value: item.assigned }, { label: "累计体验人数", value: item.experienced }, { label: "当前选用人数", value: item.current }, { label: "近 7 天活跃且当前选用", value: item.active_current }, { label: "明确偏好票数", value: item.preferred }].map(row => <div key={row.label}><dt>{row.label}</dt><dd>{row.value}</dd></div>)}</dl><div className="trial-vote-share"><span>占全部有效投票（含“都可以”）</span><strong>{votes ? (item.preferred / votes * 100).toFixed(1) + "%" : "—"}</strong></div></article>)}</div>
       <p className="text-sm text-muted-foreground">都可以：{stats.votes.equal} 票 · 尚未投票：{stats.not_voted} 人。切换次数与默认分组不计作偏好票；同一账号修改投票会覆盖旧票，撤回后不计票。</p>
       <div className="trial-cohorts"><h2 className="text-base font-medium">按初始分组检查偏好</h2><div className="overflow-x-auto"><table><thead><tr><th>初始分组</th><th>更喜欢 A</th><th>更喜欢 B</th></tr></thead><tbody>{["a", "b"].map(cohort => <tr key={cohort}><th>初始 {cohort.toUpperCase()}</th>{stats.variants.map(item => <td key={item.variant}>{item.preferred_by_cohort[cohort as "a" | "b"]}</td>)}</tr>)}</tbody></table></div></div>
-      <div className="trial-method"><h2 className="text-base font-medium">统计口径</h2><p>按账号稳定哈希近似均分 A/B，同一账号跨设备保留选择。每个账号仅记录一份试用状态，先体验两款才能投票。不额外保存提示词、图片或逐次点击日志。</p><p>“累计体验”可同时包含同一用户，因此 A/B 相加可能超过参与人数。除标注“近 7 天”的指标外，其余均为本次试用累计数；偏好票为每人最近一次有效选择。</p><p>这是自愿反馈，不是严格随机对照实验。先观察实际样本与分组偏差，再决定保留哪款；样本不足时不宣布胜出。</p><p>首次体验：{stats.started_at ? new Date(stats.started_at * 1000).toLocaleString("zh-CN") : "尚无"} · 试用标识：{stats.trial_id}</p></div>
+      <div className="trial-method"><h2 className="text-base font-medium">统计口径</h2><p>按账号稳定哈希近似均分 A/B，同一账号跨设备保留选择。每个账号仅记录一份试用状态，先体验两款才能投票。不额外保存提示词、图片或逐次点击日志。</p><p>“累计体验”可同时包含同一用户，因此 A/B 相加可能超过参与人数。除标注“近 7 天”的指标外，其余均为本次试用累计数；偏好票为每人最近一次有效选择。</p><p>这是自愿反馈，不是严格随机对照实验。先观察实际样本与分组偏差，再决定保留哪款；样本不足时不宣布胜出。</p><p>首次体验：{stats.started_at ? formatUtc8Time(stats.started_at) : "尚无"} · 试用标识：{stats.trial_id}</p></div>
     </>}
   </section>;
 }

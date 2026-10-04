@@ -3,6 +3,7 @@
 通过管理员密钥认证
 """
 from datetime import datetime
+from services.display_time import format_display_time
 from fastapi import APIRouter, HTTPException, Header, Query
 from pydantic import BaseModel, Field
 from services.admin_audit_service import admin_audit_service
@@ -138,9 +139,9 @@ async def list_keys(
             k.pop("full_key", None)
             k["full_key_available"] = False
         if k.get("created_at"):
-            k["created_at_str"] = datetime.fromtimestamp(k["created_at"]).strftime("%Y-%m-%d %H:%M:%S")
+            k["created_at_str"] = format_display_time(k["created_at"])
         if k.get("expires_at"):
-            k["expires_at_str"] = datetime.fromtimestamp(k["expires_at"]).strftime("%Y-%m-%d %H:%M:%S") if k["expires_at"] > 0 else "永不过期"
+            k["expires_at_str"] = format_display_time(k["expires_at"]) if k["expires_at"] > 0 else "永不过期"
         api_key = api_key_service.get_key(k["key"])
         k["is_valid"] = api_key.is_valid() if api_key else False
         if redeemed:
@@ -173,8 +174,8 @@ async def get_key_info(
     if redeemed:
         d["is_valid"] = False
     d["remaining"] = api_key.remaining()
-    d["created_at_str"] = datetime.fromtimestamp(d["created_at"]).strftime("%Y-%m-%d %H:%M:%S")
-    d["expires_at_str"] = datetime.fromtimestamp(d["expires_at"]).strftime("%Y-%m-%d %H:%M:%S") if d["expires_at"] > 0 else "永不过期"
+    d["created_at_str"] = format_display_time(d["created_at"])
+    d["expires_at_str"] = format_display_time(d["expires_at"]) if d["expires_at"] > 0 else "永不过期"
     
     return {"api_key": d}
 
@@ -453,7 +454,7 @@ async def get_usage_records(
     # 格式化时间
     for r in records.get("records", []):
         if r.get("timestamp"):
-            r["timestamp_str"] = datetime.fromtimestamp(r["timestamp"]).strftime("%Y-%m-%d %H:%M:%S")
+            r["timestamp_str"] = format_display_time(r["timestamp"])
     
     return records
 

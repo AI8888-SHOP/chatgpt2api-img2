@@ -1,5 +1,7 @@
 "use client";
 
+import { formatUtc8Time } from "@/lib/datetime";
+
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import {
@@ -52,7 +54,7 @@ function formatAction(action: string) {
 
 function formatTime(timestamp?: number) {
   if (!timestamp) return "-";
-  return new Date(timestamp * 1000).toLocaleString("zh-CN");
+  return formatUtc8Time(timestamp);
 }
 
 export default function AdminDashboardPage() {
@@ -300,7 +302,7 @@ export default function AdminDashboardPage() {
                         <td className="px-3 py-2.5">{record.api_key_name || record.api_key || "-"}</td>
                         <td className="px-3 py-2.5">{record.model || "-"}</td>
                         <td className="px-3 py-2.5">{record.duration_ms}ms</td>
-                        <td className="px-3 py-2.5">{record.timestamp_str || formatTime(record.timestamp)}</td>
+                        <td className="px-3 py-2.5">{formatTime(record.timestamp)}</td>
                       </tr>
                     ))}
                   </tbody>

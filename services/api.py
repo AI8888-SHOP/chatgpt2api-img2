@@ -25,7 +25,7 @@ from admin.api_key_service import init_default_admin_key
 from services.account_service import account_service
 from services.api_key_service import api_key_service
 from services.chatgpt_service import ChatGPTService
-from services.config import ConfigSaveError, DATA_DIR, config
+from services.config import ConfigSaveError, ImageModelsConfigError, DATA_DIR, config
 from services.prompt_optimizer_service import (
     OptimizerLimits, PromptOptimizerService, read_optimizer_request, require_optimizer_session,
 )
@@ -1228,11 +1228,13 @@ def create_app() -> FastAPI:
 
     @router.get("/app-config")
     async def get_app_config():
-        return {
+        return JSONResponse({
             "site_title": config.get_site_title(),
             "quick_prompts": config.get_quick_prompts(),
             "psd_task_price": config.psd_task_price,
-        }
+            "image_models": config.get_public_image_models(),
+            "default_image_model": config.get_default_image_model(),
+        }, headers={"Cache-Control": "no-store"})
 
     @router.get("/api/settings")
     async def get_settings(authorization: str | None = Header(default=None)):
@@ -1249,6 +1251,8 @@ def create_app() -> FastAPI:
             return {"config": config.update(body.model_dump(mode="python"))}
         except ConfigSaveError as exc:
             raise HTTPException(status_code=500, detail={"error": str(exc)}) from exc
+        except ImageModelsConfigError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from None
         except ValueError:
             raise HTTPException(status_code=400, detail={"error": "提示词优化配置无效，请检查地址、密钥、模型和限额范围"}) from None
 
@@ -1772,9 +1776,24 @@ def create_app() -> FastAPI:
                 progress_text=_image_progress_text("error"),
             )
 
+    def require_frontend_image_model(model: str) -> str:
+        requested = str(model or "").strip()
+        if not requested or requested == "auto":
+            requested = config.get_default_image_model()
+        if not requested or requested not in {item["id"] for item in config.get_public_image_models()}:
+            raise HTTPException(status_code=400, detail={"error": "该模型未开放或已停用，请刷新页面选择可用模型"})
+        route_model = "grok-imagine-image" if requested.lower() == "grok-imagine-image-edit" else requested.lower()
+        enabled = {str(item["model"]).lower() for item in config.get_enabled_image_upstreams()}
+        configured = {str(item["model"]).lower() for item in config.get_image_upstreams()}
+        # gpt-image-2 can use the account pool only when no upstream route was configured.
+        if route_model not in enabled and (route_model != "gpt-image-2" or route_model in configured):
+            raise HTTPException(status_code=503, detail={"error": "该模型暂无启用的生图上游，请联系管理员配置"})
+        return requested
+
     @router.post("/v1/image-jobs/generations")
     async def create_generation_job(body: ImageGenerationRequest, authorization: str | None = Header(default=None)):
         _, api_key = require_user(authorization)
+        body.model = require_frontend_image_model(body.model)
         reservation = reserve_user_quota(api_key, body.n, action="image_generate", model=body.model)
         job_id = _create_image_job(
             api_key,
@@ -1791,11 +1810,13 @@ def create_app() -> FastAPI:
             image: list[UploadFile] | None = File(default=None),
             image_list: list[UploadFile] | None = File(default=None, alias="image[]"),
             prompt: str = Form(...),
-            model: str = Form(default="gpt-image-2"),
+            model: str = Form(default="auto"),
             n: int = Form(default=1),
             client_conversation_id: str = Form(default=""),
             client_image_id: str = Form(default=""),
     ):
+        _, api_key = require_user(authorization)
+        model = require_frontend_image_model(model)
         if n < 1 or n > 4:
             raise HTTPException(status_code=400, detail={"error": "n must be between 1 and 4"})
         uploads = [*(image or []), *(image_list or [])]
@@ -1811,7 +1832,6 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=413, detail={"error": "image files are too large"})
             images.append((image_data, file_name, mime_type))
 
-        _, api_key = require_user(authorization)
         reservation = reserve_user_quota(api_key, n, action="image_edit", model=model)
         job_id = _create_image_job(
             api_key,
@@ -1855,7 +1875,9 @@ def create_app() -> FastAPI:
     @router.post("/v1/images/generations")
     async def generate_images(body: ImageGenerationRequest, authorization: str | None = Header(default=None)):
         start_time = datetime.now().timestamp()
-        _, api_key = require_user(authorization)
+        token, api_key = require_user(authorization)
+        if token.startswith("usr_"):
+            body.model = require_frontend_image_model(body.model)
         reservation = reserve_user_quota(api_key, body.n, action="image_generate", model=body.model)
         try:
             result = await run_in_threadpool(
@@ -1921,6 +1943,9 @@ def create_app() -> FastAPI:
             n: int = Form(default=1),
     ):
         start_time = datetime.now().timestamp()
+        token, api_key = require_user(authorization)
+        if token.startswith("usr_"):
+            model = require_frontend_image_model(model)
         if n < 1 or n > 4:
             raise HTTPException(status_code=400, detail={"error": "n must be between 1 and 4"})
         uploads = [*(image or []), *(image_list or [])]
@@ -1936,7 +1961,6 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=413, detail={"error": "image files are too large"})
             images.append((image_data, file_name, mime_type))
 
-        _, api_key = require_user(authorization)
         reservation = reserve_user_quota(api_key, n, action="image_edit", model=model)
         try:
             result = await run_in_threadpool(

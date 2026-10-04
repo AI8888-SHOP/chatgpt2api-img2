@@ -1,5 +1,7 @@
 "use client";
 
+import { formatUtc8Time, parseServerDate } from "@/lib/datetime";
+
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ComponentProps } from "react";
 import {
@@ -107,7 +109,7 @@ function formatRestoreAt(value?: string | null) {
     return { absolute: "—", relative: "" };
   }
 
-  const date = new Date(value);
+  const date = parseServerDate(value);
   if (Number.isNaN(date.getTime())) {
     return { absolute: value, relative: "" };
   }
@@ -118,10 +120,7 @@ function formatRestoreAt(value?: string | null) {
   const hours = totalHours % 24;
   const relative = diffMs > 0 ? `剩余 ${days}d ${hours}h` : "已到恢复时间";
 
-  const pad = (num: number) => String(num).padStart(2, "0");
-  const absolute = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(
-    date.getHours(),
-  )}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+  const absolute = formatUtc8Time(value);
 
   return { absolute, relative };
 }

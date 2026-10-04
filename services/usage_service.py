@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Optional
 from datetime import datetime, timedelta
 from threading import RLock
+from services.display_time import DISPLAY_TIMEZONE
 
 DATA_FILE = Path(__file__).resolve().parent.parent / "data" / "usage_logs.json"
 MAX_LOG_RECORDS = 10000  # 保留最近 10000 条记录
@@ -101,7 +102,7 @@ class UsageService:
         # 按天统计
         daily_stats = {}
         for r in records:
-            day = datetime.fromtimestamp(r.get("timestamp", 0)).strftime("%Y-%m-%d")
+            day = datetime.fromtimestamp(r.get("timestamp", 0), DISPLAY_TIMEZONE).strftime("%Y-%m-%d")
             if day not in daily_stats:
                 daily_stats[day] = {"total": 0, "success": 0, "failed": 0}
             daily_stats[day]["total"] += 1

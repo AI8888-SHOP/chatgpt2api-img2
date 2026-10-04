@@ -15,7 +15,7 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
-import type { ImageModel, QuickPromptConfig } from "@/lib/api";
+import type { ImageModel, ImageModelConfig, QuickPromptConfig } from "@/lib/api";
 import type { ImageConversationMode } from "@/store/image-conversations";
 
 import { AspectRatioSelect } from "./size-selector";
@@ -23,6 +23,9 @@ import { AspectRatioSelect } from "./size-selector";
 type ImageComposerProps = {
   mode: ImageConversationMode;
   model: ImageModel;
+  availableModels: ImageModelConfig[];
+  modelsLoading: boolean;
+  modelsError: string;
   prompt: string;
   imageCount: string;
   size: string;
@@ -51,14 +54,13 @@ type ImageComposerProps = {
 };
 
 const formatOptions = ["png", "jpeg", "webp"];
-const modelOptions: Array<{ value: ImageModel; label: string }> = [
-  { value: "gpt-image-2", label: "gpt-image-2" },
-  { value: "grok-imagine-image", label: "grok-imagine-image" },
-];
 
 export function ImageComposer({
   mode,
   model,
+  availableModels,
+  modelsLoading,
+  modelsError,
   prompt,
   imageCount,
   size,
@@ -102,6 +104,7 @@ export function ImageComposer({
 
   return (
     <div className="studio-composer">
+      {modelsError && <p role="status" className="px-4 py-2 text-sm text-amber-700 dark:text-amber-300">{modelsError}</p>}
       {mode === "edit" && (
         <input
           ref={fileInputRef}
@@ -220,7 +223,7 @@ export function ImageComposer({
                   </Button>
                 ) : null}
 
-                <ImageModelSelect value={model} onChange={onModelChange} />
+                <ImageModelSelect value={model} onChange={onModelChange} availableModels={availableModels} modelsLoading={modelsLoading} />
 
                 <AspectRatioSelect value={size} onChange={onSizeChange} />
 
@@ -260,7 +263,7 @@ export function ImageComposer({
                   <button
                     type="button"
                     onClick={() => void onSubmit()}
-                    disabled={isOptimizingPrompt || !prompt.trim() || (mode === "edit" && referenceImages.length === 0)}
+                    disabled={isOptimizingPrompt || modelsLoading || !availableModels.some(item => item.id === model) || !prompt.trim() || (mode === "edit" && referenceImages.length === 0)}
                     className="studio-generate-button"
                   >
                     <ArrowUp className="size-3.5 sm:size-4" />
@@ -279,26 +282,30 @@ export function ImageComposer({
 function ImageModelSelect({
   value,
   onChange,
+  availableModels,
+  modelsLoading,
 }: {
   value: ImageModel;
   onChange: (value: ImageModel) => void;
+  availableModels: ImageModelConfig[];
+  modelsLoading: boolean;
 }) {
-  const availableOptions = modelOptions;
+  const availableOptions = availableModels;
 
   return (
     <Select
       value={value}
       onValueChange={(nextValue) => {
-        const option = availableOptions.find((item) => item.value === nextValue);
-        if (option) onChange(option.value);
+        const option = availableOptions.find((item) => item.id === nextValue);
+        if (option) onChange(option.id);
       }}
     >
-      <SelectTrigger className="col-span-2 h-9 w-full rounded-full border-white/70 bg-white/80 text-xs font-medium text-stone-700 shadow-none sm:col-span-1 sm:w-[176px]">
-        <SelectValue />
+      <SelectTrigger aria-label="生图模型" disabled={modelsLoading || availableOptions.length === 0} className="col-span-2 h-9 w-full rounded-full border-white/70 bg-white/80 text-xs font-medium text-stone-700 shadow-none sm:col-span-1 sm:w-[176px]">
+        <SelectValue placeholder={modelsLoading ? "加载模型中" : "暂无可用模型"} />
       </SelectTrigger>
       <SelectContent>
         {availableOptions.map((option) => (
-          <SelectItem key={option.value} value={option.value}>
+          <SelectItem key={option.id} value={option.id}>
             {option.label}
           </SelectItem>
         ))}

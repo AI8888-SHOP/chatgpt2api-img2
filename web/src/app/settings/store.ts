@@ -218,6 +218,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         document.title = siteTitle;
         document.documentElement.dataset.siteTitle = siteTitle;
         window.dispatchEvent(new CustomEvent("app:site-title", { detail: { siteTitle } }));
+        window.dispatchEvent(new Event("app:models-updated"));
       }
       toast.success("配置已保存");
     } catch (error) {
