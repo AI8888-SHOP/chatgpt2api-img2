@@ -18,6 +18,7 @@ function createUpstream(index: number): ImageUpstreamConfig {
     base_url: "",
     api_key: "",
     model: "gpt-image-2",
+    models: ["gpt-image-2"],
     enabled: true,
   };
 }
@@ -133,11 +134,14 @@ export function ImageUpstreamsCard() {
                       />
                     </div>
                     <div className="space-y-2">
-                      <label className="text-sm font-medium text-stone-700">模型</label>
+                      <label className="text-sm font-medium text-stone-700">支持模型（逗号分隔）</label>
                       <Input
-                        value={item.model}
-                        onChange={(event) => updateItem(index, { model: event.target.value })}
-                        placeholder="gpt-image-2"
+                        value={(item.models?.length ? item.models : [item.model]).join(", ")}
+                        onChange={(event) => {
+                          const models = event.target.value.split(",").map((model) => model.trim()).filter(Boolean);
+                          updateItem(index, { models, model: models[0] || "" });
+                        }}
+                        placeholder="gpt-image-2, gpt-image-1"
                         className="h-11 rounded-xl border-stone-200 bg-white"
                       />
                     </div>

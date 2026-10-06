@@ -107,6 +107,40 @@ class AdminModelsTests(unittest.TestCase):
             with patch.object(upstream_module, "config", self.store):
                 self.assertTrue(upstream_module.is_upstream_image_model("custom-image"))
 
+    def test_one_upstream_can_expose_multiple_models_and_legacy_model_is_migrated(self):
+        self.store.update({"image_upstreams": [{
+            "name": "synthetic",
+            "base_url": "https://example.test/v1",
+            "api_key": "private-test-key",
+            "models": ["custom-image", "gpt-image-1", "custom-image"],
+            "enabled": True,
+        }]})
+        upstreams = self.store.get_image_upstreams()
+        self.assertEqual(upstreams[0]["models"], ["custom-image", "gpt-image-1"])
+        self.assertEqual(upstreams[0]["model"], "custom-image")
+        with patch.object(upstream_module, "config", self.store):
+            self.assertTrue(upstream_module.is_upstream_image_model("gpt-image-1"))
+            self.assertFalse(upstream_module.is_upstream_image_model("gpt-image-2"))
+            selected = upstream_module._choose_upstream("gpt-image-1")
+            self.assertEqual(upstream_module._model_for_upstream(selected, "gpt-image-1"), "gpt-image-1")
+
+    def test_frontend_model_route_accepts_model_from_shared_channel(self):
+        self.store.update({"image_upstreams": [{
+            "name": "synthetic",
+            "base_url": "https://example.test/v1",
+            "api_key": "private-test-key",
+            "models": ["custom-image", "gpt-image-1"],
+            "enabled": True,
+        }], "image_models": [{"id": "gpt-image-1", "label": "Image 1", "enabled": True}],
+        "default_image_model": "gpt-image-1"})
+        with patch.object(api_module, "config", self.store), \
+                patch.object(api_module, "reserve_user_quota", return_value={"id": "synthetic", "amount": 1}), \
+                patch.object(api_module, "_create_image_job", return_value="synthetic-job"), \
+                patch.object(api_module, "Thread") as worker:
+            response = self.client.post("/v1/image-jobs/generations", json={"prompt": "synthetic", "model": "gpt-image-1"})
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(worker.call_args.kwargs["args"][2].model, "gpt-image-1")
+
 
 class DisplayTimeTests(unittest.TestCase):
     def test_utc8_midnight_and_daily_statistics(self):

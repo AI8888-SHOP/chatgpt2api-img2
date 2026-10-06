@@ -53,14 +53,17 @@ def is_upstream_image_model(model: object) -> bool:
     if requested in {GROK_IMAGE_MODEL, GROK_IMAGE_EDIT_MODEL}:
         return True
     # A disabled upstream must not silently fall through to the account pool.
-    return any(
-        str(item.get("model") or "").strip().lower() == requested
-        for item in config.get_image_upstreams()
-    )
+    return any(requested in _upstream_models(item) for item in config.get_image_upstreams())
 
 
 def is_grok_image_model(model: object) -> bool:
     return str(model or "").strip().lower() in {GROK_IMAGE_MODEL, GROK_IMAGE_EDIT_MODEL}
+
+
+def _upstream_models(upstream: dict[str, object]) -> set[str]:
+    raw = upstream.get("models")
+    values = raw if isinstance(raw, list) else [upstream.get("model")]
+    return {str(value or "").strip().lower() for value in values if str(value or "").strip()}
 
 
 def _choose_upstream(model: str = "") -> dict[str, object]:
@@ -73,7 +76,7 @@ def _choose_upstream(model: str = "") -> dict[str, object]:
         upstreams = [
             upstream
             for upstream in upstreams
-            if str(upstream.get("model") or "").strip().lower() == configured_model
+            if configured_model in _upstream_models(upstream)
         ]
         if not upstreams:
             raise ImageGenerationError(f"image upstream is not configured for model: {requested_model}")
@@ -83,6 +86,16 @@ def _choose_upstream(model: str = "") -> dict[str, object]:
         if not available:
             available = upstreams
         return available[next(_UPSTREAM_COUNTER) % len(available)]
+
+
+def _model_for_upstream(upstream: dict[str, object], requested: str = "") -> str:
+    requested_model = str(requested or "").strip()
+    supported = _upstream_models(upstream)
+    if requested_model and requested_model.lower() in supported:
+        return requested_model
+    raw = upstream.get("models")
+    values = raw if isinstance(raw, list) else [upstream.get("model")]
+    return str(next((value for value in values if str(value or "").strip()), "gpt-image-2")).strip()
 
 
 def _normalize_grok_generation_size(size: str) -> str:
@@ -250,7 +263,7 @@ def generate_image_upstream(
     # retain the final selected upstream even when the request raises.
     if metadata is not None:
         metadata["upstream_name"] = str(upstream.get("name") or "未命名上游")[:200]
-    upstream_model = str(upstream.get("model") or "gpt-image-2")
+    upstream_model = _model_for_upstream(upstream, model)
     record_metadata = {
         **(metadata or {}),
         "model": upstream_model,
@@ -344,7 +357,7 @@ def edit_image_upstream(
     upstream = _choose_upstream(model)
     if metadata is not None:
         metadata["upstream_name"] = str(upstream.get("name") or "未命名上游")[:200]
-    configured_model = str(upstream.get("model") or "gpt-image-2")
+    configured_model = _model_for_upstream(upstream, model)
     upstream_model = GROK_IMAGE_EDIT_MODEL if configured_model == GROK_IMAGE_MODEL else configured_model
     record_metadata = {
         **(metadata or {}),

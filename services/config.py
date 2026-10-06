@@ -17,6 +17,7 @@ DEFAULT_IMAGE_UPSTREAM = {
     "base_url": "",
     "api_key": "",
     "model": "gpt-image-2",
+    "models": ["gpt-image-2"],
     "enabled": True,
 }
 
@@ -535,12 +536,25 @@ class ConfigStore:
         if not base_url or not api_key:
             return None
         name = str(item.get("name") or "").strip() or f"上游 {index + 1}"
-        model = str(item.get("model") or "").strip() or "gpt-image-2"
+        raw_models = item.get("models")
+        if isinstance(raw_models, list):
+            model_values = raw_models
+        else:
+            model_values = [item.get("model")]
+        models: list[str] = []
+        for value in model_values:
+            model = str(value or "").strip()
+            if model and model.lower() not in {item.lower() for item in models}:
+                models.append(model[:128])
+        if not models:
+            models = ["gpt-image-2"]
         return {
             "name": name,
             "base_url": base_url,
             "api_key": api_key,
-            "model": model,
+            # Keep model for old callers/config exports; models is authoritative.
+            "model": models[0],
+            "models": models,
             "enabled": _normalize_bool(item.get("enabled"), True),
         }
 

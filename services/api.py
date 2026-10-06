@@ -1800,8 +1800,12 @@ def create_app() -> FastAPI:
         if not requested or requested not in {item["id"] for item in config.get_public_image_models()}:
             raise HTTPException(status_code=400, detail={"error": "该模型未开放或已停用，请刷新页面选择可用模型"})
         route_model = "grok-imagine-image" if requested.lower() == "grok-imagine-image-edit" else requested.lower()
-        enabled = {str(item["model"]).lower() for item in config.get_enabled_image_upstreams()}
-        configured = {str(item["model"]).lower() for item in config.get_image_upstreams()}
+        def upstream_models(item: dict[str, object]) -> set[str]:
+            values = item.get("models") if isinstance(item.get("models"), list) else [item.get("model")]
+            return {str(value or "").strip().lower() for value in values if str(value or "").strip()}
+
+        enabled = {model_id for item in config.get_enabled_image_upstreams() for model_id in upstream_models(item)}
+        configured = {model_id for item in config.get_image_upstreams() for model_id in upstream_models(item)}
         # gpt-image-2 can use the account pool only when no upstream route was configured.
         if route_model not in enabled and (route_model != "gpt-image-2" or route_model in configured):
             raise HTTPException(status_code=503, detail={"error": "该模型暂无启用的生图上游，请联系管理员配置"})

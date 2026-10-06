@@ -35,6 +35,9 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
       base_url: String(item.base_url || ""),
       api_key: String(item.api_key || ""),
       model: String(item.model || "gpt-image-2"),
+      models: Array.isArray(item.models) && item.models.length > 0
+        ? item.models.map((model) => String(model || "").trim()).filter(Boolean)
+        : [String(item.model || "gpt-image-2")],
       enabled: item.enabled !== false,
     })),
     image_upstream_cooldown_secs: Math.max(0, Number(config.image_upstream_cooldown_secs ?? 600)),
@@ -200,7 +203,8 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
           name: item.name.trim(),
           base_url: item.base_url.trim().replace(/\/+$/, ""),
           api_key: item.api_key.trim(),
-          model: item.model.trim() || "gpt-image-2",
+          model: (item.models?.[0] || item.model).trim() || "gpt-image-2",
+          models: (item.models?.length ? item.models : [item.model]).map((model) => model.trim()).filter(Boolean),
           enabled: item.enabled,
         })),
         quick_prompts: (config.quick_prompts || [])
