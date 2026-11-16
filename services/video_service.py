@@ -7,6 +7,7 @@ import logging
 import sqlite3
 import time
 import uuid
+import subprocess
 from contextlib import contextmanager
 from pathlib import Path
 from threading import Event, RLock, Thread
@@ -42,8 +43,9 @@ class VideoRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=8000)
     duration: int = Field(default=5, ge=1, le=15, strict=True)
     aspect_ratio: Literal["16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3"] = "16:9"
-    resolution: Literal["480p", "720p"] = "480p"
-    mode: Literal["text", "image", "reference"] = "text"
+    resolution: Literal["480p", "720p", "1080p"] = "480p"
+    mode: Literal["text", "image", "reference", "edit", "extend"] = "text"
+    reference_videos: list[VideoImage] = Field(default_factory=list, max_length=1)
     reference_images: list[VideoImage] = Field(default_factory=list, max_length=14)
     reference_audios: list[VideoAudio] = Field(default_factory=list, max_length=3)
     generate_audio: bool = True
@@ -70,7 +72,7 @@ def endpoint(channel, suffix="", protocol="grok"):
         return base + "/contents/generations/tasks" + suffix
     if not base.endswith("/v1"):
         base += "/v1"
-    return base + "/videos/generations" + suffix
+    return base + ("/videos" if protocol == "native" else "/videos/generations") + suffix
 
 
 class VideoService:
@@ -91,6 +93,10 @@ class VideoService:
             columns = {row[1] for row in db.execute("PRAGMA table_info(video_jobs)")}
             if "client_request_id" not in columns:
                 db.execute("ALTER TABLE video_jobs ADD COLUMN client_request_id TEXT")
+            if "next_poll" not in columns:
+                db.execute("ALTER TABLE video_jobs ADD COLUMN next_poll REAL NOT NULL DEFAULT 0")
+            if "diagnostic_id" not in columns:
+                db.execute("ALTER TABLE video_jobs ADD COLUMN diagnostic_id TEXT NOT NULL DEFAULT ''")
             db.execute("CREATE UNIQUE INDEX IF NOT EXISTS video_client_requests ON video_jobs(owner,client_request_id)")
         self.assets = VideoAssets(self)
 
@@ -132,6 +138,16 @@ class VideoService:
 
     def prepare_payload(self, user, body, model):
         protocol = model["protocol"]
+        editing = body.mode in {"edit", "extend"}
+        if editing and not model.get("supports_" + body.mode):
+            raise HTTPException(400, "所选模型未开放此视频操作")
+        if body.reference_videos and (protocol != "native" or (not editing and not model.get("supports_video_reference"))):
+            raise HTTPException(400, "所选模型未开放参考视频")
+        if editing and (len(body.reference_videos) != 1 or body.reference_images or body.reference_audios):
+            raise HTTPException(400, "编辑或延长必须提供一个视频，不能同时提交图片或音频")
+        if body.reference_videos and body.mode not in {"reference", "edit", "extend"}:
+            raise HTTPException(400, "请使用参考素材、编辑或延长模式")
+        videos = [self.assets.resolve(user.id, video.asset_id, "video", protocol) for video in body.reference_videos]
         has_references = body.mode == "reference" or bool(body.reference_audios)
         maximum = model["reference_max_duration"] if has_references else model["max_duration"]
         if not model["min_duration"] <= body.duration <= maximum or body.resolution not in model["resolutions"]:
@@ -142,7 +158,7 @@ class VideoService:
             raise HTTPException(400, "请切换为图片或参考素材生成模式")
         if body.mode == "image" and len(body.reference_images) != 1:
             raise HTTPException(400, "图生视频需要一张首帧图")
-        if body.mode == "reference" and not (body.reference_images or body.reference_audios):
+        if body.mode == "reference" and not (body.reference_images or body.reference_audios or body.reference_videos):
             raise HTTPException(400, "请添加参考图或音频")
         if body.mode == "image" and body.reference_audios:
             raise HTTPException(400, "组合图片与音频请使用参考素材模式")
@@ -158,13 +174,28 @@ class VideoService:
                     raise HTTPException(400, "所选模型不支持预设音色")
                 voices.append({"voice_id": audio.voice_id})
             else:
-                if not model["supports_audio_upload"] or protocol != "seedance":
+                if not model["supports_audio_upload"] or protocol not in {"seedance", "native"}:
                     raise HTTPException(400, "所选模型不支持参考音频上传")
                 audio_urls.append(self.assets.resolve(user.id, audio.asset_id, "audio", protocol))
         if len(audio_urls) > 1 or (audio_urls and not images):
             raise HTTPException(400, "参考音频最多一个，并需搭配至少一张参考图")
         payload = {"model": body.model, "duration": body.duration, "resolution": body.resolution, "generate_audio": body.generate_audio}
-        if protocol == "seedance":
+        if protocol == "native":
+            payload = {"model": body.model, "prompt": body.prompt, "seconds": body.duration, "resolution": body.resolution, "aspect_ratio": body.aspect_ratio}
+            if videos:
+                payload["videos"] = videos
+                payload["omni_reference_task_type"] = body.mode
+            if editing:
+                payload.pop("aspect_ratio")
+                payload.pop("resolution")
+            if images:
+                if body.mode == "image":
+                    payload["input_reference"] = images[0]
+                else:
+                    payload["images"] = images
+            if audio_urls:
+                payload["audios"] = audio_urls
+        elif protocol == "seedance":
             content = [{"type": "text", "text": body.prompt}]
             content.extend({"type": "image_url", "image_url": {"url": url}, "role": "first_frame" if body.mode == "image" else "reference_image"} for url in images)
             content.extend({"type": "audio_url", "audio_url": {"url": url}, "role": "reference_audio"} for url in audio_urls)
@@ -198,6 +229,8 @@ class VideoService:
         price = max(1, min(1000, int(self.config.get().get("video_credits_per_second") or 1)))
         if body.resolution == "720p":
             price = int(self.config.get().get("video_720p_credits_per_second", price * 2))
+        if body.resolution == "1080p":
+            price = int(self.config.get().get("video_1080p_credits_per_second", price * 4))
         amount = body.duration * price
         with self.lock, self.connect() as db:
             if body.client_request_id:
@@ -265,6 +298,10 @@ class VideoService:
     def tick(self, row):
         payload = json.loads(row["payload"])
         protocol = payload.get("protocol", "grok")
+        if row["next_poll"] > time.time():
+            return
+        if row["accounted"]:
+            return
         if row["state"] in {"done", "failed", "expired"}:
             if row["reservation"]:
                 if row["state"] == "done":
@@ -284,6 +321,9 @@ class VideoService:
             return
         if row["state"] in {"unknown", "preparing"}:
             return
+        if protocol == "native" and time.time() - row["created"] > 7 * 86400:
+            self.update(row["id"], state="unknown", error="任务超过网关七天查询期限，请管理员核对原任务；不会重新生成")
+            return
         # Model catalog edits must not strand existing paid jobs. Only the
         # original enabled channel and credential are required for polling.
         channel = next((c for c in self.config.get_video_upstreams() if c.get("enabled") and channel_key(c) == row["channel"]), None)
@@ -291,6 +331,10 @@ class VideoService:
             self.update(row["id"], error="原上游不可用，请管理员恢复原渠道配置后继续查询")
             return
         headers = {"Authorization": "Bearer " + str(channel["api_key"])}
+        if row["state"] == "downloading":
+            self.update(row["id"], next_poll=time.time() + 60)
+            self.download_native(row, channel, headers)
+            return
         creating = row["state"] == "queued"
         if creating:
             self.update(row["id"], state="submitting")
@@ -300,19 +344,31 @@ class VideoService:
                     response = session.post(endpoint(channel, protocol=protocol), json=payload.get("upstream_payload", payload), headers=headers, timeout=(10, 45), allow_redirects=False)
                 else:
                     response = session.get(endpoint(channel, "/" + quote(row["remote_id"], safe=""), protocol), headers=headers, timeout=(10, 30), allow_redirects=False)
+                diagnostic = response.headers.get("X-Upstream-Ops-Request-Id")
+                if protocol == "native" and isinstance(diagnostic, str):
+                    self.update(row["id"], diagnostic_id=diagnostic[:200])
                 if response.status_code >= 400:
+                    if protocol == "native" and not creating and response.status_code in {401, 403, 404, 410}:
+                        self.update(row["id"], state="unknown", error=f"原任务查询需要管理员核对（HTTP {response.status_code}），不会重新生成")
+                        return
                     if creating and response.status_code in {400,401,403,404,422,429}:
                         self.update(row["id"], state="failed", error=f"上游拒绝请求（HTTP {response.status_code}）")
                         return
                     raise ValueError("upstream unavailable")
                 response.raise_for_status()
                 data = response.json()
+                if protocol == "native" and not creating:
+                    delay = data.get("poll_after_ms", data.get("poll_interval_ms", 10000))
+                    delay = delay if isinstance(delay, (int, float)) else 10000
+                    self.update(row["id"], next_poll=time.time() + max(5, min(300, delay / 1000)))
                 if creating:
-                    remote_id = data.get("request_id") or data.get("id")
+                    remote_id = data.get("id") if protocol == "native" else data.get("request_id") or data.get("id")
                     if not isinstance(remote_id, str) or not remote_id or len(remote_id) > 512:
                         raise ValueError("missing request id")
                     self.update(row["id"], state="pending", remote_id=remote_id, error="")
-                elif data.get("status") == ("succeeded" if protocol == "seedance" else "done"):
+                elif protocol == "native" and data.get("status") == "completed":
+                    self.update(row["id"], state="downloading", error="")
+                elif data.get("status") == ("succeeded" if protocol == "seedance" else "done") and protocol != "native":
                     video = data.get("content" if protocol == "seedance" else "video") or {}
                     url = video.get("video_url" if protocol == "seedance" else "url")
                     if not isinstance(url, str) or urlsplit(url).scheme not in {"https", "http"}:
@@ -321,15 +377,59 @@ class VideoService:
                 elif data.get("status") in {"failed", "expired", "cancelled"}:
                     self.update(row["id"], state="expired" if data["status"] == "expired" else "failed", error="上游视频生成失败或已过期，积分将自动退回")
                 else:
-                    self.update(row["id"], error="")
+                    if protocol == "native" and data.get("status") not in {"queued", "in_progress"}:
+                        self.update(row["id"], error="上游状态暂不明确，保留原任务等待核对", next_poll=time.time() + 300)
+                    else:
+                        self.update(row["id"], error="")
         except (requests.RequestException, ValueError, TypeError, AttributeError):
             self.update(row["id"], **({"state": "unknown", "error": "提交结果未知，请联系管理员核对；不会自动重试"} if creating else {"error": "暂时无法查询上游，后台将继续查询"}))
+            if protocol == "native" and not creating:
+                self.update(row["id"], next_poll=time.time() + 60)
         finally:
             if creating and "upstream_payload" in payload:
                 # No resubmission is allowed, so retain only asset IDs and user
                 # parameters, not large data URIs or signed provider fetch URLs.
                 payload.pop("upstream_payload")
                 self.update(row["id"], payload=json.dumps(payload))
+
+    def download_native(self, row, channel, headers):
+        root = self.path.parent / "video_results"
+        root.mkdir(parents=True, exist_ok=True)
+        target = root / (row["id"] + ".mp4")
+        partial = target.with_suffix(".part")
+        try:
+            with requests.Session() as session:
+                with session.get(endpoint(channel, "/" + quote(row["remote_id"], safe="") + "/content", "native"), headers=headers, stream=True, timeout=(10, 60), allow_redirects=False) as response:
+                    if response.status_code != 200:
+                        if response.status_code in {401, 403, 404, 410}:
+                            self.update(row["id"], state="unknown", error=f"原视频下载需要管理员核对（HTTP {response.status_code}），不会重新生成")
+                            return
+                        raise ValueError("download unavailable")
+                    size, started = 0, time.monotonic()
+                    with partial.open("wb") as output:
+                        for chunk in response.iter_content(1024 * 1024):
+                            size += len(chunk)
+                            if size > 200 * 1024 * 1024 or time.monotonic() - started > 180:
+                                raise ValueError("download limit")
+                            output.write(chunk)
+            probe = subprocess.run(["ffprobe", "-v", "error", "-protocol_whitelist", "file,pipe", "-show_streams", "-of", "json", str(partial)], capture_output=True, timeout=15, check=True)
+            if not any(s.get("codec_type") == "video" for s in json.loads(probe.stdout).get("streams", [])):
+                raise ValueError("not a video")
+            partial.replace(target)
+            self.update(row["id"], state="done", result=json.dumps({"url": "/v1/video-jobs/" + row["id"] + "/content", "local": True}), error="")
+        except (requests.RequestException, ValueError, OSError, subprocess.SubprocessError):
+            self.update(row["id"], error="视频已生成，文件暂未保存，后台将重试下载；请勿重复生成")
+        finally:
+            partial.unlink(missing_ok=True)
+
+    def content_path(self, owner, job_id):
+        job = self.get(owner, job_id)
+        if job["status"] != "done" or not job.get("video", {}).get("local"):
+            raise HTTPException(404, "视频文件暂不可用")
+        path = self.path.parent / "video_results" / (job["request_id"] + ".mp4")
+        if not path.is_file():
+            raise HTTPException(404, "视频文件不存在")
+        return path
 
     def run(self):
         while not self.stop_event.is_set():

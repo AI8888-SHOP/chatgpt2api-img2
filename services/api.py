@@ -924,6 +924,12 @@ def create_app() -> FastAPI:
         _, user = require_user(authorization)
         return await run_in_threadpool(videos.list, user.id)
 
+    @router.api_route("/v1/video-jobs/{job_id}/content", methods=["GET", "HEAD"])
+    async def video_content(job_id: str, authorization: str | None = Header(default=None)):
+        _, user = require_user(authorization)
+        path = await run_in_threadpool(videos.content_path, user.id, job_id)
+        return FileResponse(path, media_type="video/mp4", headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})
+
     @router.post("/v1/video-assets")
     async def upload_video_asset(request: Request, authorization: str | None = Header(default=None)):
         _, user = require_user(authorization)
@@ -941,19 +947,19 @@ def create_app() -> FastAPI:
             raw = bytearray()
             async with asyncio.timeout(60):
                 async for chunk in request.stream():
-                    if len(raw) + len(chunk) > 21 * 1024 * 1024:
-                        raise HTTPException(413, "上传内容超过 21 MB")
+                    if len(raw) + len(chunk) > 51 * 1024 * 1024:
+                        raise HTTPException(413, "上传内容超过 51 MB")
                     raw.extend(chunk)
             async def chunks():
                 yield bytes(raw)
             form = await MultiPartParser(request.headers, chunks(), max_files=1, max_fields=1, max_part_size=1024).parse()
             kind, file = form.get("kind"), form.get("file")
-            if kind not in {"image", "audio"} or not isinstance(file, StarletteUploadFile):
+            if kind not in {"image", "audio", "video"} or not isinstance(file, StarletteUploadFile):
                 raise HTTPException(400, "请提供素材类型和文件")
-            capable = any(m.get("max_reference_images", 0) > 0 if kind == "image" else m.get("supports_audio_upload") for m in public["video_models"])
+            capable = any(m.get("max_reference_images", 0) > 0 if kind == "image" else (m.get("supports_video_reference") or m.get("supports_edit") or m.get("supports_extend")) if kind == "video" else m.get("supports_audio_upload") for m in public["video_models"])
             if not capable:
                 raise HTTPException(400, "当前没有可用模型支持此类参考素材")
-            content = await file.read((5 if kind == "image" else 20) * 1024 * 1024 + 1)
+            content = await file.read((5 if kind == "image" else 50 if kind == "video" else 20) * 1024 * 1024 + 1)
             return await run_in_threadpool(videos.assets.save, user.id, content, kind)
         except MultiPartException:
             raise HTTPException(400, "上传格式无效，只允许一个素材文件") from None
@@ -1353,6 +1359,7 @@ def create_app() -> FastAPI:
     async def get_app_config():
         return JSONResponse({
             "site_title": config.get_site_title(),
+            "video_1080p_credits_per_second": config.get().get("video_1080p_credits_per_second", config.get().get("video_credits_per_second", 1) * 4),
             "image_generate_price": config.get().get("image_generate_price", 1),
             "image_edit_price": config.get().get("image_edit_price", 1),
             "video_720p_credits_per_second": config.get().get("video_720p_credits_per_second", config.get().get("video_credits_per_second", 1) * 2),

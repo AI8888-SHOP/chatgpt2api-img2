@@ -35,11 +35,11 @@ class VideoAssets:
             db.execute("DELETE FROM video_assets WHERE expires<?", (time.time(),))
 
     def save(self, owner, content, kind):
-        if kind not in {"image", "audio"}:
+        if kind not in {"image", "audio", "video"}:
             raise HTTPException(400, "仅支持参考图片或音频")
-        limit = IMAGE_LIMIT if kind == "image" else AUDIO_LIMIT
+        limit = IMAGE_LIMIT if kind == "image" else 50 * 1024 * 1024 if kind == "video" else AUDIO_LIMIT
         if not content or len(content) > limit:
-            raise HTTPException(413, "图片最多 5 MB，音频最多 20 MB")
+            raise HTTPException(413, "图片最多 5 MB，音频最多 20 MB，视频最多 50 MB")
         if kind == "image":
             try:
                 with Image.open(io.BytesIO(content)) as img:
@@ -54,6 +54,10 @@ class VideoAssets:
                 mime = "image/jpeg"
             except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError):
                 raise HTTPException(400, "参考图须为有效的 PNG、JPEG 或 WebP，最多 2000 万像素") from None
+        elif kind == "video":
+            if content[4:8] != b"ftyp":
+                raise HTTPException(400, "参考视频仅支持 MP4，最多50 MB、1–60秒")
+            mime = "video/mp4"
         else:
             wav = content[:4] == b"RIFF" and content[8:12] == b"WAVE"
             mp3 = content[:3] == b"ID3" or (len(content) > 2 and content[0] == 255 and content[1] & 0xE0 == 0xE0)
@@ -71,16 +75,16 @@ class VideoAssets:
                 raise HTTPException(429, "视频参考素材空间已达上限，请稍后重试")
             try:
                 path.write_bytes(content)
-                if kind == "audio":
+                if kind in {"audio", "video"}:
                     try:
                         result = subprocess.run(["ffprobe", "-v", "error", "-protocol_whitelist", "file,pipe", "-show_format", "-show_streams", "-of", "json", str(path)], capture_output=True, timeout=10, check=True)
                         probe = json.loads(result.stdout)
                         duration = float(probe.get("format", {}).get("duration", 0))
                         streams = probe.get("streams", [])
-                        if not 2 <= duration <= 15 or not any(s.get("codec_type") == "audio" for s in streams):
+                        if not (1 if kind == "video" else 2) <= duration <= (60 if kind == "video" else 15) or not any(s.get("codec_type") == kind for s in streams):
                             raise ValueError()
                     except (subprocess.SubprocessError, ValueError, KeyError):
-                        raise HTTPException(400, "音频必须可读取，且时长为 2–15 秒") from None
+                        raise HTTPException(400, "素材必须可读取：音频2–15秒，视频1–60秒") from None
                 now = time.time()
                 db.execute("INSERT INTO video_assets VALUES(?,?,?,?,?,?,?,?)", (asset_id, owner, secrets.token_urlsafe(32), kind, mime, len(content), now, now + 48 * 3600))
             except Exception:

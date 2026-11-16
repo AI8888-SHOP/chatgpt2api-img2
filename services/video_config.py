@@ -10,21 +10,28 @@ class VideoModel(BaseModel):
     id: str = Field(min_length=1, max_length=100)
     label: str = Field(default="", max_length=80)
     enabled: bool = True
-    protocol: Literal["grok", "seedance"] = "grok"
+    protocol: Literal["grok", "seedance", "native"] = "grok"
     max_reference_images: int = Field(default=7, ge=0, le=14)
     supports_voice: bool = False
     supports_audio_upload: bool = False
+    supports_video_reference: bool = False
+    supports_edit: bool = False
+    supports_extend: bool = False
     min_duration: int = Field(default=1, ge=1, le=15)
     max_duration: int = Field(default=15, ge=1, le=15)
     reference_max_duration: int = Field(default=10, ge=1, le=15)
-    resolutions: list[Literal["480p", "720p"]] = Field(default_factory=lambda: ["480p", "720p"], min_length=1, max_length=2)
+    resolutions: list[Literal["480p", "720p", "1080p"]] = Field(default_factory=lambda: ["480p", "720p"], min_length=1, max_length=3)
 
     @model_validator(mode="after")
     def capabilities(self):
+        if self.protocol != "native" and (self.supports_video_reference or self.supports_edit or self.supports_extend or "1080p" in self.resolutions):
+            raise ValueError("参考视频、编辑/延长和1080p目前仅支持原生视频协议")
         if self.min_duration > self.max_duration or not self.min_duration <= self.reference_max_duration <= self.max_duration:
             raise ValueError("视频时长范围无效")
         if self.protocol == "grok" and self.supports_audio_upload:
             raise ValueError("Grok 公开接口仅支持预设音色，不支持音频文件上传")
+        if self.protocol == "native" and self.supports_voice:
+            raise ValueError("原生视频接口不支持预设音色")
         if self.protocol == "seedance" and (self.supports_voice or self.max_reference_images > 9):
             raise ValueError("Seedance 不支持 Grok 预设音色，参考图最多 9 张")
         self.label = self.label or self.id

@@ -74,7 +74,7 @@ class UsageUpstreamTests(unittest.TestCase):
             response = client.post("/v1/video-assets", data={"kind": "image"}, files={"file": ("image.png", b"synthetic", "image/png")})
             self.assertEqual(response.status_code, 200, response.text)
             self.assertEqual(assets.save.call_args.args[1:], (b"synthetic", "image"))
-            self.assertEqual(client.post("/v1/video-assets", content=b"x" * (21 * 1024 * 1024 + 1)).status_code, 413)
+            self.assertEqual(client.post("/v1/video-assets", content=b"x" * (51 * 1024 * 1024 + 1)).status_code, 413)
             with patch.object(api, "require_user", side_effect=HTTPException(401)):
                 self.assertEqual(client.post("/v1/video-assets", content=b"invalid").status_code, 401)
 

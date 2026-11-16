@@ -8,9 +8,9 @@ import { Checkbox } from "@/components/ui/checkbox";
 import type { VideoModelConfig, VideoChannelConfig } from "@/lib/api";
 import { useSettingsStore } from "../store";
 
-const preset = (protocol: "grok" | "seedance"): VideoModelConfig => protocol === "grok"
-  ? { id: "grok-imagine-video-1.5", label: "Grok 视频 1.5", protocol, enabled: true, max_reference_images: 14, supports_voice: true, supports_audio_upload: false, min_duration: 1, max_duration: 15, reference_max_duration: 15, resolutions: ["480p", "720p"] }
-  : { id: "seedance-video", label: "Seedance 视频", protocol, enabled: true, max_reference_images: 9, supports_voice: false, supports_audio_upload: false, min_duration: 4, max_duration: 15, reference_max_duration: 15, resolutions: ["480p", "720p"] };
+const preset = (protocol: "grok" | "seedance" | "native"): VideoModelConfig => protocol === "grok"
+  ? { id: "grok-imagine-video-1.5", label: "Grok 视频 1.5", protocol, enabled: true, max_reference_images: 14, supports_voice: true, supports_audio_upload: false, supports_video_reference: false, supports_edit: false, supports_extend: false, min_duration: 1, max_duration: 15, reference_max_duration: 15, resolutions: ["480p", "720p"] }
+  : { id: "seedance-video", label: "Seedance 视频", protocol, enabled: true, max_reference_images: 9, supports_voice: false, supports_audio_upload: false, supports_video_reference: false, supports_edit: false, supports_extend: false, min_duration: 4, max_duration: 15, reference_max_duration: 15, resolutions: ["480p", "720p"] };
 
 export function VideoSettingsCard() {
   const { config, isSavingConfig, isLoadingConfig, setConfigValue, saveConfig } = useSettingsStore();
@@ -27,8 +27,9 @@ export function VideoSettingsCard() {
           <label className="flex items-center gap-2 text-sm">480p 每秒积分<Input aria-label="视频每秒积分" type="number" min={1} max={1000} className="w-24" value={config?.video_credits_per_second ?? 1} onChange={e => setConfigValue("video_credits_per_second", Math.max(1, Math.min(1000, Math.trunc(Number(e.target.value) || 1))))} /></label>
         </div>
         <label className="flex items-center gap-2 text-sm">720p 每秒积分<Input aria-label="720p 每秒积分" type="number" min={1} max={10000} className="w-24" value={config?.video_720p_credits_per_second ?? (config?.video_credits_per_second ?? 1) * 2} onChange={e => setConfigValue("video_720p_credits_per_second", Math.max(1, Math.min(10000, Math.trunc(Number(e.target.value) || 1))))} /></label>
+        <label className="flex items-center gap-2 text-sm">1080p 每秒积分<Input aria-label="1080p 每秒积分" type="number" min={1} max={10000} value={config?.video_1080p_credits_per_second ?? (config?.video_credits_per_second ?? 1) * 4} onChange={e => setConfigValue("video_1080p_credits_per_second", Math.max(1, Math.min(10000, Math.trunc(Number(e.target.value) || 1))))} /></label>
         <p className="text-xs text-muted-foreground">按时长乘以对应分辨率单价计费。每用户每分钟一次、同时一个任务，全站最多八个。实际供应商费用与本站积分独立。</p>
-        <label className="block space-y-2 text-sm">素材公网地址（Seedance 上传参考图与音频时必填）
+        <label className="block space-y-2 text-sm">素材公网地址（Seedance / 原生协议上传素材时必填）
           <Input aria-label="视频素材公网地址" placeholder="https://img.example.com" value={config?.video_public_base_url || ""} onChange={e => setConfigValue("video_public_base_url", e.target.value)} />
           <span className="block text-xs text-muted-foreground">填写本站可被上游访问的 HTTPS 地址，必须能访问 /video-assets/。素材以随机链接供上游读取，48 小时后过期。</span>
         </label>
@@ -37,7 +38,7 @@ export function VideoSettingsCard() {
             <div className="grid gap-3 sm:grid-cols-3">
               <label className="space-y-1 text-sm">模型 ID<Input aria-label={`视频模型 ID ${index + 1}`} value={model.id} maxLength={100} onChange={e => editModel(index, { id: e.target.value })} /></label>
               <label className="space-y-1 text-sm">显示名称<Input aria-label={`视频模型名称 ${index + 1}`} value={model.label} onChange={e => editModel(index, { label: e.target.value })} /></label>
-              <label className="space-y-1 text-sm">接口协议<select aria-label={`视频模型协议 ${index + 1}`} className="h-9 w-full rounded-md border bg-background px-2" value={model.protocol} onChange={e => editModel(index, { ...preset(e.target.value as "grok" | "seedance"), id: model.id, label: model.label })}><option value="grok">Grok · /v1/videos/generations</option><option value="seedance">Seedance · Ark 原生任务</option></select></label>
+              <label className="space-y-1 text-sm">接口协议<select aria-label={`视频模型协议 ${index + 1}`} className="h-9 w-full rounded-md border bg-background px-2" value={model.protocol} onChange={e => editModel(index, { ...preset(e.target.value as "grok" | "seedance" | "native"), id: model.id, label: model.label })}><option value="grok">Grok · /v1/videos/generations</option><option value="native">upstream-ops · /v1/videos</option><option value="seedance">Seedance · Ark 原生任务</option></select></label>
             </div>
             <div className="grid gap-3 sm:grid-cols-4">
               {([['min_duration','最短秒数',1,15],['max_duration','最长秒数',1,15],['reference_max_duration','参考模式最长秒数',1,15],['max_reference_images','参考图上限',0,model.protocol === 'grok' ? 14 : 9]] as const).map(([key,label,min,max]) => <label key={key} className="space-y-1 text-sm">{label}<Input aria-label={`${label} ${index + 1}`} type="number" min={min} max={max} value={model[key]} onChange={e => editModel(index, { [key]: Math.max(min, Math.min(max, Math.trunc(Number(e.target.value) || min))) })} /></label>)}
@@ -45,8 +46,9 @@ export function VideoSettingsCard() {
             <div className="flex flex-wrap items-center gap-4 text-sm">
               <label className="flex items-center gap-2"><Checkbox checked={model.enabled} onCheckedChange={v => editModel(index, { enabled: v === true })} />启用</label>
               <label className="flex items-center gap-2"><input type="radio" name="default-video-model" aria-label={`默认视频模型 ${index + 1}`} checked={config?.default_video_model === model.id && Boolean(model.id)} onChange={() => setConfigValue("default_video_model", model.id)} />默认</label>
-              {(["480p", "720p"] as const).map(res => <label key={res} className="flex items-center gap-2"><Checkbox checked={model.resolutions.includes(res)} onCheckedChange={v => editModel(index, { resolutions: v === true ? [...model.resolutions, res] : model.resolutions.filter(r => r !== res) })} />{res}</label>)}
+              {( (model.protocol === "native" ? ["480p", "720p", "1080p"] : ["480p", "720p"]) as ("480p" | "720p" | "1080p")[]).map(res => <label key={res} className="flex items-center gap-2"><Checkbox checked={model.resolutions.includes(res)} onCheckedChange={v => editModel(index, { resolutions: v === true ? [...model.resolutions, res] : model.resolutions.filter(r => r !== res) })} />{res}</label>)}
               {model.protocol === "grok" ? <label className="flex items-center gap-2"><Checkbox checked={model.supports_voice} onCheckedChange={v => editModel(index, { supports_voice: v === true })} />支持预设音色（1.5）</label> : <label className="flex items-center gap-2"><Checkbox checked={model.supports_audio_upload} onCheckedChange={v => editModel(index, { supports_audio_upload: v === true })} />已确认上游支持参考音频上传</label>}
+              {model.protocol === "native" && ([["supports_video_reference", "参考视频"], ["supports_edit", "视频编辑"], ["supports_extend", "视频延长"]] as const).map(([key, label]) => <label key={key} className="flex items-center gap-2"><Checkbox checked={model[key] === true} onCheckedChange={v => editModel(index, { [key]: v === true })} />{label}</label>)}
               <Button variant="ghost" size="icon" aria-label={`删除视频模型 ${index + 1}`} onClick={() => setConfigValue("video_models", models.filter((_, i) => i !== index))}><Trash2 size={16} /></Button>
             </div>
           </div>)}

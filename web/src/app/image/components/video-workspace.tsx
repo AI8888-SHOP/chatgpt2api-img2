@@ -8,13 +8,30 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useDesign } from "@/components/design-provider";
 import { PersonalPrompts } from "@/components/personal-prompts";
+import { httpRequest } from "@/lib/request";
 import { createVideoJob, fetchPublicAppConfig, fetchUserKeyInfo, fetchVideoJobs, uploadVideoAsset, type PublicAppConfig, type VideoGenerationParams, type VideoJob } from "@/lib/api";
 
 type Attachment = { id: string; file: File; preview: string; assetId?: string };
 const terminal = (job: VideoJob) => ["done", "failed", "expired"].includes(job.status);
-const statusText: Record<string, string> = { preparing: "准备中", queued: "排队中", submitting: "正在提交", pending: "正在生成", done: "生成完成", failed: "生成失败", expired: "任务已过期", unknown: "等待管理员核对" };
+const statusText: Record<string, string> = { preparing: "准备中", queued: "排队中", submitting: "正在提交", pending: "正在生成", downloading: "正在保存视频", done: "生成完成", failed: "生成失败", expired: "任务已过期", unknown: "等待管理员核对" };
 const ratios = ["16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3"];
 const selectClass = "h-10 w-full rounded-lg border bg-background px-3 text-sm";
+
+function VideoResult({ job }: { job: VideoJob }) {
+  const [url, setUrl] = useState("");
+  const [error, setError] = useState(false);
+  const [retry, setRetry] = useState(0);
+  useEffect(() => {
+    let cancelled = false, objectUrl = "";
+    setUrl(""); setError(false);
+    if (!job.video?.local) { setUrl(job.video?.url || ""); return; }
+    httpRequest<Blob>(`/v1/video-jobs/${encodeURIComponent(job.request_id)}/content`, { authScope: "user", responseType: "blob" }).then(blob => {
+      if (!cancelled) { objectUrl = URL.createObjectURL(blob); setUrl(objectUrl); }
+    }).catch(() => { if (!cancelled) setError(true); });
+    return () => { cancelled = true; if (objectUrl) URL.revokeObjectURL(objectUrl); };
+  }, [job.request_id, job.video?.url, job.video?.local, retry]);
+  return error ? <button onClick={() => setRetry(v => v + 1)}>视频加载失败，点击重试</button> : !url ? <p>正在加载视频…</p> : <><video controls playsInline preload="metadata" className="max-h-[55dvh] w-full rounded-xl bg-black" src={url} /><a href={url} download={job.video?.local ? `${job.request_id}.mp4` : undefined} target="_blank" rel="noopener noreferrer" className="underline">打开 / 保存视频</a><p className="text-xs text-muted-foreground">{job.video?.local ? "视频已保存到本站服务器。" : "视频地址由上游提供，可能过期，请及时保存。"}</p></>;
+}
 
 export function VideoWorkspace() {
   const { variant } = useDesign();
@@ -29,6 +46,7 @@ export function VideoWorkspace() {
   const [generateAudio, setGenerateAudio] = useState(true);
   const [voice, setVoice] = useState("");
   const [images, setImages] = useState<Attachment[]>([]);
+  const [video, setVideo] = useState<Attachment | null>(null);
   const [audio, setAudio] = useState<Attachment | null>(null);
   const [jobs, setJobs] = useState<VideoJob[]>([]);
   const [selectedId, setSelectedId] = useState("");
@@ -45,10 +63,11 @@ export function VideoWorkspace() {
   const outputRef = useRef<HTMLDivElement>(null);
   const models = config?.video_models || [];
   const model = models.find(m => m.id === modelId);
+  const editing = mode === "edit" || mode === "extend";
   const referenceMode = mode === "reference";
   const maxDuration = model ? (referenceMode ? model.reference_max_duration : model.max_duration) : 15;
   const maxImages = mode === "image" ? 1 : model?.max_reference_images || 0;
-  const price = duration * (resolution === "720p" ? (config?.video_720p_credits_per_second ?? (config?.video_credits_per_second || 1) * 2) : (config?.video_credits_per_second || 1));
+  const price = duration * (resolution === "1080p" ? (config?.video_1080p_credits_per_second ?? (config?.video_credits_per_second || 1) * 4) : resolution === "720p" ? (config?.video_720p_credits_per_second ?? (config?.video_credits_per_second || 1) * 2) : (config?.video_credits_per_second || 1));
   const active = jobs.find(j => !terminal(j));
   const selected = jobs.find(j => j.request_id === selectedId) || jobs[0];
 
@@ -81,32 +100,34 @@ export function VideoWorkspace() {
   useEffect(() => {
     if (!model) return;
     setDuration(value => Math.max(model.min_duration, Math.min(value, maxDuration)));
-    setResolution(value => model.resolutions.includes(value as "480p" | "720p") ? value : model.resolutions[0]);
+    setResolution(value => model.resolutions.includes(value as "480p" | "720p" | "1080p") ? value : model.resolutions[0]);
   }, [model, maxDuration]);
 
   const changed = () => { request.current = null; setSubmitError(""); };
   const release = (item: Attachment) => { URL.revokeObjectURL(item.preview); previews.current.delete(item.preview); };
-  const clearReferences = () => { images.forEach(release); if (audio) release(audio); setImages([]); setAudio(null); setVoice(""); };
+  const clearReferences = () => { images.forEach(release); if (video) release(video); setVideo(null); if (audio) release(audio); setImages([]); setAudio(null); setVoice(""); };
   const changeMode = (next: VideoGenerationParams["mode"]) => { changed(); clearReferences(); setMode(next); };
-  const attach = async (files: File[], kind: "image" | "audio") => {
+  const attach = async (files: File[], kind: "image" | "audio" | "video") => {
     changed();
     const selectedFiles = files.slice(0, kind === "image" ? Math.max(0, maxImages - images.length) : 1);
     if (selectedFiles.length < files.length) toast.info(`最多添加 ${kind === "image" ? maxImages + " 张图片" : "一个音频"}`);
     const additions: Attachment[] = [];
     for (const file of selectedFiles) {
-      const valid = kind === "image" ? ["image/png", "image/jpeg", "image/webp"].includes(file.type) : /\.(mp3|wav)$/i.test(file.name);
-      if (!valid || file.size > (kind === "image" ? 5 : 20) * 1024 * 1024) { toast.error(kind === "image" ? "图片仅支持 PNG/JPEG/WebP，每张最多 5 MB" : "音频仅支持 MP3/WAV，最多 20 MB、2–15 秒"); continue; }
+      const valid = kind === "image" ? ["image/png", "image/jpeg", "image/webp"].includes(file.type) : kind === "video" ? /\.mp4$/i.test(file.name) : /\.(mp3|wav)$/i.test(file.name);
+      if (!valid || file.size > (kind === "image" ? 5 : kind === "video" ? 50 : 20) * 1024 * 1024) { toast.error(kind === "image" ? "图片仅支持 PNG/JPEG/WebP，每张最多 5 MB" : kind === "video" ? "视频仅支持 MP4，最多50 MB、1–60秒" : "音频仅支持 MP3/WAV，最多 20 MB、2–15 秒"); continue; }
       const preview = URL.createObjectURL(file); previews.current.add(preview);
       additions.push({ id: crypto.randomUUID(), file, preview });
     }
     if (kind === "image") setImages(current => [...current, ...additions].slice(0, maxImages));
+    else if (kind === "video" && additions[0]) { if (video) release(video); setVideo(additions[0]); }
     else if (additions[0]) { if (audio) release(audio); setAudio(additions[0]); }
   };
 
   const submit = async () => {
     if (submitting.current || !model || !prompt.trim() || active) return;
     if (mode === "image" && images.length !== 1) return toast.error("请添加一张首帧图片");
-    if (referenceMode && !images.length && !audio && !voice.trim()) return toast.error("请添加参考图或音频");
+    if (editing && !video) return toast.error("请上传需要编辑或延长的视频");
+    if (referenceMode && !video && !images.length && !audio && !voice.trim()) return toast.error("请添加参考图或音频");
     if (audio && !images.length) return toast.error("参考音频需搭配至少一张参考图");
     const voiceIds = voice.split(",").map(value => value.trim()).filter(Boolean);
     if (voiceIds.length > 3 || voiceIds.some(value => !/^[a-zA-Z0-9_-]{1,64}$/.test(value))) return toast.error("最多填写三个有效音色 ID，以英文逗号分隔");
@@ -126,7 +147,9 @@ export function VideoWorkspace() {
           audio.assetId = id; audios.push({ asset_id: id });
         }
         if (voiceIds.length) audios.push(...voiceIds.map(voice_id => ({ voice_id })));
-        request.current = { model: model.id, prompt: prompt.trim(), duration, resolution, aspect_ratio: ratio, mode, generate_audio: generateAudio, reference_images: imageIds, reference_audios: audios, client_request_id: crypto.randomUUID() };
+        const videoIds: { asset_id: string }[] = [];
+        if (video) { setStage("上传参考视频"); const id = video.assetId || (await uploadVideoAsset(video.file, "video")).asset_id; video.assetId = id; videoIds.push({ asset_id: id }); }
+        request.current = { reference_videos: videoIds, model: model.id, prompt: prompt.trim(), duration, resolution, aspect_ratio: ratio, mode, generate_audio: generateAudio, reference_images: imageIds, reference_audios: audios, client_request_id: crypto.randomUUID() };
       }
       setStage("提交后台任务");
       const created = await createVideoJob(request.current);
@@ -146,7 +169,7 @@ export function VideoWorkspace() {
       <div className="video-preview p-4 sm:p-6">
         {!selected ? <div className="flex min-h-72 flex-col items-center justify-center gap-3 text-center text-muted-foreground"><Film size={40} strokeWidth={1} /><h2 className="text-lg text-foreground">把想象变成一段视频</h2><p className="max-w-sm text-sm">先选择模型，再描述场景、人物动作与镜头运动。生成结果会保存在这里。</p></div> : <article className="space-y-4">
           <div className="flex flex-wrap justify-between gap-2 text-sm"><span role="status">{statusText[selected.status] || selected.status}</span><span className="text-muted-foreground">{selected.duration} 秒 · {selected.resolution} · {selected.credits} 积分</span></div>
-          {selected.video ? <><video key={selected.video.url} controls playsInline preload="metadata" className="max-h-[55dvh] w-full rounded-xl bg-black" src={selected.video.url} /><a className="inline-flex min-h-10 items-center text-sm underline underline-offset-4" href={selected.video.url} target="_blank" rel="noopener noreferrer">打开 / 保存视频</a><p className="text-xs text-muted-foreground">视频地址由上游提供，可能过期，请及时保存。</p></> : <div className="flex min-h-52 flex-col items-center justify-center gap-3 rounded-xl border border-dashed bg-muted/20">{!terminal(selected) && selected.status !== "unknown" ? <LoaderCircle className="animate-spin text-primary" /> : <Film className="text-muted-foreground" />}<p className="text-sm">{selected.status === "unknown" ? "提交结果待核对，请联系管理员，不要重复生成" : terminal(selected) ? (selected.accounted ? "生成未完成，积分已退回" : "正在处理退款") : "任务在后台运行，刷新或关闭页面不会中断"}</p></div>}
+          {selected.video ? <VideoResult job={selected} /> : <div className="flex min-h-52 flex-col items-center justify-center gap-3 rounded-xl border border-dashed bg-muted/20">{!terminal(selected) && selected.status !== "unknown" ? <LoaderCircle className="animate-spin text-primary" /> : <Film className="text-muted-foreground" />}<p className="text-sm">{selected.status === "unknown" ? "提交结果待核对，请联系管理员，不要重复生成" : terminal(selected) ? (selected.accounted ? "生成未完成，积分已退回" : "正在处理退款") : "任务在后台运行，刷新或关闭页面不会中断"}</p></div>}
           {selected.error && <p role="alert" className="text-sm text-amber-700 dark:text-amber-300">{selected.error}</p>}
           <p className="whitespace-pre-wrap break-words rounded-lg bg-muted/30 p-3 text-sm">{selected.prompt}</p>
           <p className="break-all text-xs text-muted-foreground">{selected.model} · {new Date(selected.created_at * 1000).toLocaleString("zh-CN")} · {selected.request_id}</p>
@@ -164,10 +187,13 @@ export function VideoWorkspace() {
         <label className="block space-y-2 text-sm">视频模型<select aria-label="视频模型" className={selectClass} value={modelId} onChange={e => { changed(); clearReferences(); setMode("text"); setModelId(e.target.value); }}><option value="" disabled>选择视频模型</option>{models.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}</select></label>
         <PersonalPrompts prompt={prompt} onApply={content => { const next = (prompt.trimEnd() ? prompt.trimEnd() + "\n" : "") + content; if (next.length > 8000) { toast.error("合并后的提示词超过 8000 字，请先精简内容"); return; } changed(); setPrompt(next); }} />
         <div className="flex flex-wrap gap-2" role="group" aria-label="视频生成方式">
-          {([['text','文生视频'],['image','图生视频'],['reference','参考素材']] as const).map(([value, label]) => <Button key={value} size="sm" variant={mode === value ? "default" : "outline"} aria-pressed={mode === value} disabled={value !== "text" && !model?.max_reference_images && !(value === "reference" && model?.supports_voice)} onClick={() => changeMode(value)}>{label}</Button>)}
+          {([['text','文生视频'],['image','图生视频'],['reference','参考素材']] as const).map(([value, label]) => <Button key={value} size="sm" variant={mode === value ? "default" : "outline"} aria-pressed={mode === value} disabled={value !== "text" && !model?.max_reference_images && !(value === "reference" && (model?.supports_voice || model?.supports_video_reference || model?.supports_audio_upload))} onClick={() => changeMode(value)}>{label}</Button>)}
+          {model?.supports_edit && <Button size="sm" variant={mode === "edit" ? "default" : "outline"} onClick={() => changeMode("edit")}>编辑视频</Button>}
+          {model?.supports_extend && <Button size="sm" variant={mode === "extend" ? "default" : "outline"} onClick={() => changeMode("extend")}>延长视频</Button>}
         </div>
+        {(editing || (referenceMode && model?.supports_video_reference)) && <div className="space-y-2"><label>添加视频<input aria-label="上传参考视频" type="file" accept="video/mp4,.mp4" onChange={e => { void attach(Array.from(e.target.files || []), "video"); e.target.value = ""; }} /></label><p className="text-xs text-muted-foreground">MP4，最多50 MB、1–60秒。{editing ? "画面尺寸跟随原视频；清晰度选择用于计费档位，未强制传给上游。" : ""}</p>{video && <><video controls src={video.preview} className="w-full rounded" /><Button onClick={() => { changed(); release(video); setVideo(null); }}>移除视频</Button></>}</div>}
         <label className="block space-y-2 text-sm">视频提示词<Textarea aria-label="视频提示词" maxLength={8000} className="min-h-36 resize-y" placeholder="例如：清晨海边，女孩回头微笑，镜头缓慢推进，海浪声自然轻柔…" value={prompt} onChange={e => { changed(); setPrompt(e.target.value); }} /><span className="block text-right text-xs text-muted-foreground">{prompt.length}/8000</span></label>
-        {mode !== "text" && Boolean(model?.max_reference_images) && <div className="space-y-2">
+        {!editing && mode !== "text" && Boolean(model?.max_reference_images) && <div className="space-y-2">
           <label className="flex cursor-pointer items-center gap-2 rounded-lg border border-dashed p-3 text-sm"><ImagePlus size={18} />{mode === "image" ? "添加首帧图片" : `添加参考图（${images.length}/${maxImages}）`}<input aria-label="上传视频参考图" type="file" accept="image/png,image/jpeg,image/webp" multiple={mode === "reference"} className="sr-only" disabled={busy || images.length >= maxImages} onChange={e => { void attach(Array.from(e.target.files || []), "image"); e.target.value = ""; }} /></label>
           <p className="text-xs text-muted-foreground">每张最多 5 MB。{mode === "image" ? "作为视频起始画面；Grok 输出比例跟随首帧。" : "按添加顺序描述素材的用途。"}</p>
           <div className="flex flex-wrap gap-2">{images.map((item, index) => <div key={item.id} className="relative"><img src={item.preview} alt={`参考图 ${index + 1}`} className="h-20 w-20 rounded-lg border object-cover" /><button aria-label={`移除参考图 ${index + 1}`} className="absolute right-0 top-0 rounded-full bg-background p-1" onClick={() => { changed(); release(item); setImages(images.filter(i => i.id !== item.id)); }}><X size={14} /></button></div>)}</div>
@@ -177,10 +203,10 @@ export function VideoWorkspace() {
         <div className="grid grid-cols-2 gap-3">
           <label className="space-y-2 text-sm">时长（秒）<Input aria-label="视频时长" type="number" min={model?.min_duration || 1} max={maxDuration} value={duration} onChange={e => { changed(); setDuration(Math.max(model?.min_duration || 1, Math.min(maxDuration, Math.trunc(Number(e.target.value) || 1)))); }} /></label>
           <label className="space-y-2 text-sm">清晰度<select aria-label="视频清晰度" className={selectClass} value={resolution} onChange={e => { changed(); setResolution(e.target.value); }}>{model?.resolutions.map(r => <option key={r}>{r}</option>)}</select></label>
-          <label className="space-y-2 text-sm">画面比例<select aria-label="视频比例" className={selectClass} disabled={mode === "image" && model?.protocol === "grok"} value={ratio} onChange={e => { changed(); setRatio(e.target.value); }}>{ratios.map(r => <option key={r}>{r}</option>)}</select></label>
+          <label className="space-y-2 text-sm">画面比例<select aria-label="视频比例" className={selectClass} disabled={editing || (mode === "image" && model?.protocol === "grok")} value={ratio} onChange={e => { changed(); setRatio(e.target.value); }}>{ratios.map(r => <option key={r}>{r}</option>)}</select></label>
           <label className="flex items-center gap-2 self-end py-3 text-sm"><input type="checkbox" checked={generateAudio} disabled={Boolean(audio || voice.trim())} onChange={e => { changed(); setGenerateAudio(e.target.checked); }} />生成声音</label>
         </div>
-        <div className="rounded-lg bg-muted/30 p-3 text-sm"><div className="flex justify-between"><span>预计积分</span><strong>{price}</strong></div><p className="mt-1 text-xs text-muted-foreground">提交前预扣，明确失败自动退回。{resolution === "720p" ? "720p 按两倍计费。" : ""}</p></div>
+        <div className="rounded-lg bg-muted/30 p-3 text-sm"><div className="flex justify-between"><span>预计积分</span><strong>{price}</strong></div><p className="mt-1 text-xs text-muted-foreground">提交前预扣，明确失败自动退回。按所选清晰度及申请时长计费。</p></div>
         {submitError && <p role="alert" className="text-sm text-red-600 dark:text-red-400">{submitError}；重试相同提交会复用任务，不会重复创建。</p>}
         {active && <p role="status" className="text-sm text-muted-foreground">{active.status === "unknown" ? "已有待核对任务，请联系管理员" : "已有视频正在生成，完成后可继续提交"}</p>}
         <Button className="w-full" disabled={busy || Boolean(active) || !prompt.trim() || !historyLoaded || Boolean(historyError) || (quota !== null && quota < price)} onClick={() => void submit()}>{busy ? <><LoaderCircle size={16} className="animate-spin" />{stage}</> : quota !== null && quota < price ? "积分不足" : <><Film size={16} />{submitError ? "重试提交" : "生成视频"}</>}</Button>

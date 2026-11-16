@@ -50,6 +50,68 @@ class VideoTests(unittest.TestCase):
     def create(self):
         return self.service.create(self.user, self.body)["request_id"]
 
+    def test_native_capability_gates_and_edit_payload(self):
+        from services.video_config import VideoModel
+        model = VideoModel(id="grok-imagine-video", protocol="native", supports_edit=True, supports_extend=True, supports_video_reference=True, resolutions=["1080p"]).model_dump()
+        with patch.object(self.service.assets, "resolve", return_value="https://files.example/video.mp4"):
+            for mode in ("edit", "extend", "reference"):
+                body = VideoRequest(prompt="change", mode=mode, resolution="1080p", reference_videos=[{"asset_id": "a" * 32}])
+                payload = self.service.prepare_payload(self.user, body, model)
+                self.assertEqual(payload["videos"], ["https://files.example/video.mp4"])
+                self.assertEqual(payload["omni_reference_task_type"], mode)
+                if mode != "reference":
+                    self.assertNotIn("aspect_ratio", payload)
+                    self.assertNotIn("resolution", payload)
+                disabled = {**model, "supports_edit": False, "supports_extend": False, "supports_video_reference": False}
+                with self.assertRaises(HTTPException):
+                    self.service.prepare_payload(self.user, body, disabled)
+            with self.assertRaises(HTTPException):
+                self.service.prepare_payload(self.user, VideoRequest(prompt="x", mode="edit", resolution="1080p"), model)
+        with self.assertRaises(ValidationError):
+            VideoModel(id="x", protocol="grok", supports_edit=True)
+        self.config.update({**self.config.get(), "video_models": [model], "video_1080p_credits_per_second": 8})
+        job = self.service.create(self.user, VideoRequest(prompt="1080p", resolution="1080p", duration=5))
+        self.assertEqual(job["credits"], 40)
+
+    def test_native_completed_without_url_download_and_owner(self):
+        self.config.update({**self.config.get(), "video_models": [{"id": "grok-imagine-video", "protocol": "native"}]})
+        job_id = self.create()
+        session = self.tick(job_id, {"id": "native-task", "status": "queued"})
+        self.assertTrue(session.post.call_args.args[0].endswith("/v1/videos"))
+        body = session.post.call_args.kwargs["json"]
+        self.assertEqual(body["seconds"], 5)
+        self.assertNotIn("duration", body)
+        self.assertNotIn("generate_audio", body)
+        self.tick(job_id, {"id": "native-task", "status": "completed"})
+        self.assertEqual(self.row(job_id)["state"], "downloading")
+        self.service.update(job_id, next_poll=0)
+        with patch("services.video_service.requests.Session") as factory, patch("services.video_service.subprocess.run") as probe:
+            response = factory.return_value.__enter__.return_value.get.return_value.__enter__.return_value
+            response.status_code = 200
+            response.iter_content.return_value = [b"synthetic-video"]
+            probe.return_value.stdout = b'{"streams":[{"codec_type":"video"}]}'
+            self.service.tick(self.row(job_id))
+            call = factory.return_value.__enter__.return_value.get.call_args
+            self.assertTrue(call.args[0].endswith("/v1/videos/native-task/content"))
+            self.assertEqual(call.kwargs["headers"]["Authorization"], "Bearer private-key")
+        self.assertEqual(self.row(job_id)["state"], "done")
+        self.assertEqual(self.service.content_path(self.user.id, job_id).read_bytes(), b"synthetic-video")
+        with self.assertRaises(HTTPException):
+            self.service.content_path("another-user", job_id)
+
+    def test_native_download_failure_keeps_task(self):
+        self.config.update({**self.config.get(), "video_models": [{"id": "grok-imagine-video", "protocol": "native"}]})
+        job_id = self.create()
+        self.tick(job_id, {"id": "native-task"})
+        self.tick(job_id, {"status": "completed"})
+        self.service.update(job_id, next_poll=0)
+        with patch("services.video_service.requests.Session") as factory:
+            factory.return_value.__enter__.return_value.get.side_effect = requests.Timeout()
+            self.service.tick(self.row(job_id))
+            factory.return_value.__enter__.return_value.post.assert_not_called()
+        self.assertEqual(self.row(job_id)["state"], "downloading")
+        self.assertEqual(self.row(job_id)["remote_id"], "native-task")
+
     def test_independent_resolution_price_snapshot(self):
         self.config.update({**self.config.get(), "video_credits_per_second": 3, "video_720p_credits_per_second": 7})
         job = self.service.create(self.user, VideoRequest(prompt="test", duration=5, resolution="720p"))
@@ -144,7 +206,7 @@ class VideoTests(unittest.TestCase):
         self.assertEqual(self.row(job_id)["state"], "failed")
 
     def test_schema_and_base_url(self):
-        for extra in ({"duration": 16}, {"duration": "5"}, {"resolution": "1080p"}, {"prompt": "x" * 8001}, {"n": 2}):
+        for extra in ({"duration": 16}, {"duration": "5"}, {"resolution": "2160p"}, {"prompt": "x" * 8001}, {"n": 2}):
             with self.assertRaises(ValidationError):
                 VideoRequest(**{"prompt": "test", **extra})
         for base in ("https://provider.example", "https://provider.example/v1/"):

@@ -599,8 +599,9 @@ class ConfigStore:
         models = [dict(item) for item in self.get_video_models() if enabled and item.get("enabled") and item["id"] in routed]
         # A public HTTPS origin is required for upstream audio/image fetches on Ark.
         for model in models:
-            if model["protocol"] == "seedance" and not self.data.get("video_public_base_url"):
+            if model["protocol"] in {"seedance", "native"} and not self.data.get("video_public_base_url"):
                 model["supports_audio_upload"] = False
+                model["supports_video_reference"] = model["supports_edit"] = model["supports_extend"] = False
                 model["max_reference_images"] = 0
         default = self.data.get("default_video_model", "")
         if default not in {m["id"] for m in models}:
@@ -618,7 +619,7 @@ class ConfigStore:
         previous_data = self.data
         next_data = dict(data or {})
         next_data.update(validate_video_config(next_data, previous_data))
-        for key, default in (("image_generate_price", 1), ("image_edit_price", 1), ("video_720p_credits_per_second", previous_data.get("video_credits_per_second", 1) * 2)):
+        for key, default in (("video_1080p_credits_per_second", previous_data.get("video_credits_per_second", 1) * 4), ("image_generate_price", 1), ("image_edit_price", 1), ("video_720p_credits_per_second", previous_data.get("video_credits_per_second", 1) * 2)):
             value = next_data.get(key, previous_data.get(key, default))
             if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 10000:
                 raise ValueError("生成价格必须为 1–10000 的整数")
