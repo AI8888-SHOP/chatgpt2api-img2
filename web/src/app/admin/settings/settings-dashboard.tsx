@@ -7,6 +7,7 @@ import { CPAPoolDialog } from "@/app/settings/components/cpa-pool-dialog";
 import { CPAPoolsCard } from "@/app/settings/components/cpa-pools-card";
 import { ImageUpstreamsCard } from "@/app/settings/components/image-upstreams-card";
 import { ImageModelsCard } from "@/app/settings/components/image-models-card";
+import { VideoSettingsCard } from "@/app/settings/components/video-settings-card";
 import { PromptOptimizerCard } from "@/app/settings/components/prompt-optimizer-card";
 import { EditableStudioCard } from "@/app/settings/components/editable-studio-card";
 import { ImportBrowserDialog } from "@/app/settings/components/import-browser-dialog";
@@ -67,6 +68,7 @@ export default function SettingsPage() {
         <EditableStudioCard />
         <ImageUpstreamsCard />
         <ImageModelsCard />
+        <VideoSettingsCard />
         <CPAPoolsCard />
         <Sub2APIConnections />
       </section>

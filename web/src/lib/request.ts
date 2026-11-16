@@ -33,7 +33,7 @@ request.interceptors.request.use(async (config: InternalAxiosRequestConfig) => {
 
 request.interceptors.response.use(
   (response) => response,
-  async (error: AxiosError<{ detail?: { error?: string }; error?: string; message?: string }>) => {
+  async (error: AxiosError<{ detail?: string | { error?: string }; error?: string; message?: string }>) => {
     const status = error.response?.status;
     const config = (error.config || {}) as RequestConfig;
     const scope = config.authScope ?? "admin";
@@ -50,7 +50,7 @@ request.interceptors.response.use(
 
     const payload = error.response?.data;
     const message =
-      payload?.detail?.error ||
+      (typeof payload?.detail === "string" ? payload.detail : payload?.detail?.error) ||
       payload?.error ||
       payload?.message ||
       error.message ||

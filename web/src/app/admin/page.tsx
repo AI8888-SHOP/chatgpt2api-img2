@@ -45,6 +45,7 @@ function formatAction(action: string) {
   return (
     {
       image_generate: "文生图",
+      video_generate: "视频生成",
       image_edit: "编辑图",
       chat_image_completion: "Chat 兼容",
       responses_image_generation: "Responses 兼容",

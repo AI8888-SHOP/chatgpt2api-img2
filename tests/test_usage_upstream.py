@@ -1,4 +1,7 @@
 import itertools
+import io
+from PIL import Image
+from fastapi import HTTPException
 import json
 import os
 from pathlib import Path
@@ -61,6 +64,41 @@ class UsageUpstreamTests(unittest.TestCase):
         self.addCleanup(mock.stop)
         return result
 
+    def test_video_multipart_authenticated_and_bounded(self):
+        public = {"video_enabled": True, "video_models": [{"max_reference_images": 1}]}
+        with patch.object(api.config, "get_public_video_config", return_value=public), patch.object(api, "require_user_quota"), patch.object(api, "VideoService") as factory:
+            assets = factory.return_value.assets
+            assets.save.return_value = {"asset_id": "a" * 32}
+            client = TestClient(api.create_app(), raise_server_exceptions=False)
+            self.addCleanup(client.close)
+            response = client.post("/v1/video-assets", data={"kind": "image"}, files={"file": ("image.png", b"synthetic", "image/png")})
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(assets.save.call_args.args[1:], (b"synthetic", "image"))
+            self.assertEqual(client.post("/v1/video-assets", content=b"x" * (21 * 1024 * 1024 + 1)).status_code, 413)
+            with patch.object(api, "require_user", side_effect=HTTPException(401)):
+                self.assertEqual(client.post("/v1/video-assets", content=b"invalid").status_code, 401)
+
+    def test_original_images_exact_order_private_preview_and_cleanup(self):
+        buffer = io.BytesIO()
+        Image.new("RGB", (8, 8), "red").save(buffer, "PNG")
+        original = buffer.getvalue()
+        response = self.client.post("/v1/images/edits", data={"prompt": "edit", "model": "gpt-image-2"}, files=[("image", ("one.png", original, "image/png")), ("image", ("two.png", original, "image/png"))])
+        self.assertEqual(response.status_code, 200)
+        record = self.usage.get_records()["records"][0]
+        refs = record["reference_images"]
+        self.assertEqual([item["name"] for item in refs], ["one.png", "two.png"])
+        path = self.usage.reference_image_path(refs[0]["id"])
+        self.assertEqual(path.read_bytes(), original)
+        url = "/admin/api/usage/reference-images/" + refs[0]["id"]
+        self.assertEqual(self.client.get(url).headers["content-type"], "image/jpeg")
+        with patch.object(admin_api, "require_admin", side_effect=HTTPException(401)):
+            self.assertEqual(self.client.get(url).status_code, 401)
+        self.assertEqual(self.client.get("/admin/api/usage/reference-images/" + "0" * 32).status_code, 404)
+        record["timestamp"] = 1
+        self.usage.clear_old_records(30)
+        self.assertFalse(path.exists())
+        self.assertEqual(self.client.get(url).status_code, 404)
+
     def send(self, prefix, kind):
         if kind == "generations":
             return self.client.post(prefix + "/" + kind, json={"prompt": "synthetic prompt", "model": "gpt-image-2"})
@@ -110,6 +148,8 @@ class UsageUpstreamTests(unittest.TestCase):
                         record = self.usage.get_records()["records"][0]
                         self.assertEqual(record["upstream_name"], "线路甲")
                         self.assertEqual(record["status"], "failed" if failure else "success")
+                        if kind == "edits":
+                            self.assertEqual(self.usage.reference_image_path(record["reference_images"][0]["id"]).read_bytes(), b"synthetic")
 
     def test_failure_before_selection_is_not_attributed_to_configured_provider(self):
         with patch.object(upstream, "_choose_upstream", side_effect=ImageGenerationError("no available upstream")):

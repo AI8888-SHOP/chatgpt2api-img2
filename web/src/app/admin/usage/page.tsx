@@ -1,6 +1,7 @@
 "use client";
 
 import { formatUtc8Time } from "@/lib/datetime";
+import { httpRequest } from "@/lib/request";
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -33,6 +34,7 @@ function formatAction(action: string) {
   return (
     {
       image_generate: "文生图",
+      video_generate: "视频生成",
       image_edit: "编辑图",
       chat_image_completion: "Chat 兼容",
       responses_image_generation: "Responses 兼容",
@@ -43,6 +45,23 @@ function formatAction(action: string) {
 function formatTime(timestamp: number) {
   if (!timestamp) return "-";
   return formatUtc8Time(timestamp);
+}
+
+function ReferenceImages({ items }: { items: NonNullable<UsageRecordItem["reference_images"]> }) {
+  const [urls, setUrls] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [open, setOpen] = useState(false);
+  useEffect(() => () => { urls.forEach(url => URL.revokeObjectURL(url)); }, [urls]);
+  const show = async () => {
+    if (urls.length) { setOpen(value => !value); return; }
+    setBusy(true);
+    try {
+      const blobs = await Promise.all(items.map(item => httpRequest<Blob>(`/admin/api/usage/reference-images/${encodeURIComponent(item.id)}`, { responseType: "blob" })));
+      setUrls(blobs.map(blob => URL.createObjectURL(blob))); setOpen(true);
+    } catch { toast.error("原图预览加载失败，请重试"); }
+    finally { setBusy(false); }
+  };
+  return <div className="mt-2"><button type="button" disabled={busy} onClick={() => void show()} className="text-xs text-primary underline">{busy ? "加载原图…" : open ? "收起原图" : `查看原图（${items.length}）`}</button>{open && <div className="mt-2 flex max-w-[360px] flex-wrap gap-2">{urls.map((url, i) => <a key={items[i].id} href={url} target="_blank" rel="noreferrer" title={items[i].name}><img src={url} alt={`原图 ${i + 1}：${items[i].name}`} className="h-24 w-24 rounded border object-contain" /></a>)}</div>}</div>;
 }
 
 export default function AdminUsagePage() {
@@ -247,6 +266,7 @@ export default function AdminUsagePage() {
                         <th className="px-3 py-2.5 font-medium">提示词</th>
                         <th className="px-3 py-2.5 font-medium">模型</th>
                         <th className="px-3 py-2.5 font-medium">上游</th>
+                        <th className="px-3 py-2.5 font-medium">积分</th>
                         <th className="px-3 py-2.5 font-medium">耗时</th>
                         <th className="px-3 py-2.5 font-medium">时间</th>
                       </tr>
@@ -266,10 +286,12 @@ export default function AdminUsagePage() {
                           </td>
                           <td className="px-3 py-2.5">
                             <div className="max-w-[360px] line-clamp-2 text-stone-600">{record.prompt || "-"}</div>
+                            {record.reference_images?.length ? <ReferenceImages items={record.reference_images} /> : record.action === "image_edit" ? <div className="mt-1 text-xs text-stone-400">原图未记录</div> : null}
                             {record.error ? <div className="mt-1 max-w-[360px] line-clamp-2 text-xs text-rose-500">{record.error}</div> : null}
                           </td>
                           <td className="px-3 py-2.5">{record.model || "-"}</td>
                           <td className="px-3 py-2.5"><div className="min-w-24 max-w-48 break-words" title={record.upstream_name || undefined}>{record.upstream_name || "未记录"}</div></td>
+                          <td className="px-3 py-2.5">{record.usage_amount ?? 0}{record.action === "video_generate" && record.details?.duration ? <div className="text-xs text-stone-400">{record.details.duration} 秒 · {record.details.resolution || "-"} · {{ text: "文生", image: "图生", reference: "参考素材" }[record.details.mode || ""] || "视频"}</div> : null}</td>
                           <td className="px-3 py-2.5">{record.duration_ms}ms</td>
                           <td className="px-3 py-2.5">{formatTime(record.timestamp)}</td>
                         </tr>

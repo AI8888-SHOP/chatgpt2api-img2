@@ -5,7 +5,9 @@
 import json
 import os
 import time
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
+import uuid
+import re
 from pathlib import Path
 from typing import Optional
 from datetime import datetime, timedelta
@@ -28,13 +30,17 @@ class UsageRecord:
     duration_ms: int = 0  # 耗时
     timestamp: int = 0
     upstream_name: str = ""
+    reference_images: list[dict] = field(default_factory=list)
+    usage_amount: int = 0
+    details: dict = field(default_factory=dict)
 
     @classmethod
     def create(cls, api_key: str, api_key_name: str, action: str, prompt: str, 
                model: str, status: str, error: str = "", duration_ms: int = 0,
-               upstream_name: str = "") -> "UsageRecord":
+               upstream_name: str = "", reference_images: list[dict] | None = None,
+               usage_amount: int = 0, details: dict | None = None) -> "UsageRecord":
         return cls(
-            id=f"{int(time.time() * 1000)}_{api_key[:8]}",
+            id=uuid.uuid4().hex,
             api_key=api_key[:12] + "***",  # 脱敏
             api_key_name=api_key_name,
             action=action,
@@ -45,10 +51,43 @@ class UsageRecord:
             duration_ms=duration_ms,
             timestamp=int(time.time()),
             upstream_name=str(upstream_name or "").strip()[:200],
+            reference_images=reference_images or [],
+            usage_amount=max(0, int(usage_amount or 0)),
+            details=details or {},
         )
 
 
 class UsageService:
+    def save_reference_images(self, images: list[tuple[bytes, str, str]]) -> list[dict]:
+        """Keep exact submitted bytes privately, never under a public static directory."""
+        root = DATA_FILE.parent / "usage_reference_images"
+        root.mkdir(parents=True, exist_ok=True)
+        saved = []
+        try:
+            for data, name, mime in images:
+                image_id = uuid.uuid4().hex
+                path = root / image_id
+                saved.append({"id": image_id, "name": Path(name).name[:200], "size": len(data)})
+                with path.open("xb") as output:
+                    output.write(data)
+                path.chmod(0o600)
+            return saved
+        except Exception:
+            for item in saved:
+                (root / item["id"]).unlink(missing_ok=True)
+            raise
+
+    def reference_image_path(self, image_id: str) -> Path:
+        if not re.fullmatch(r"[a-f0-9]{32}", image_id):
+            raise FileNotFoundError()
+        with self._lock:
+            if not any(item.get("id") == image_id for record in self._records for item in record.get("reference_images", [])):
+                raise FileNotFoundError()
+        path = DATA_FILE.parent / "usage_reference_images" / image_id
+        if not path.is_file():
+            raise FileNotFoundError()
+        return path
+
     def __init__(self):
         self._records: list[dict] = []
         self._lock = RLock()
@@ -70,7 +109,9 @@ class UsageService:
         """保存记录"""
         DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
         # 只保留最近 MAX_LOG_RECORDS 条
+        removed = []
         if len(self._records) > MAX_LOG_RECORDS:
+            removed = self._records[:-MAX_LOG_RECORDS]
             self._records = self._records[-MAX_LOG_RECORDS:]
         
         tmp_file = DATA_FILE.with_suffix(f"{DATA_FILE.suffix}.tmp")
@@ -78,6 +119,18 @@ class UsageService:
             json.dump(self._records, f, ensure_ascii=False, indent=2)
             f.write("\n")
         os.replace(tmp_file, DATA_FILE)
+        self._remove_reference_files(removed)
+
+    def _remove_reference_files(self, removed: list[dict]):
+        retained = {item["id"] for record in self._records for item in record.get("reference_images", [])}
+        for record in removed:
+            for item in record.get("reference_images", []):
+                image_id = item.get("id", "")
+                if re.fullmatch(r"[a-f0-9]{32}", image_id) and image_id not in retained:
+                    try:
+                        (DATA_FILE.parent / "usage_reference_images" / image_id).unlink(missing_ok=True)
+                    except OSError:
+                        pass
 
     def log(self, record: UsageRecord):
         """记录一次使用"""
@@ -164,8 +217,10 @@ class UsageService:
         now = int(time.time())
         cutoff = now - (days * 86400)
         with self._lock:
+            removed = [r for r in self._records if r.get("timestamp", 0) < cutoff]
             self._records = [r for r in self._records if r.get("timestamp", 0) >= cutoff]
             self._save()
+            self._remove_reference_files(removed)
 
 
 # 单例实例

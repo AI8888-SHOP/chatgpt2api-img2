@@ -43,7 +43,7 @@ RUN pip install --no-cache-dir uv
 
 # Native editable documents and real rendered slide previews. No model code runs.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libreoffice-impress fonts-noto-cjk poppler-utils \
+    libreoffice-impress fonts-noto-cjk poppler-utils ffmpeg \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml uv.lock ./

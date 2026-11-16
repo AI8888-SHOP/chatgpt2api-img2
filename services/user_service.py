@@ -169,6 +169,16 @@ class UserService:
                     PRIMARY KEY (id, user_id)
                 );
 
+                CREATE TABLE IF NOT EXISTS user_prompt_presets (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    label TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_user_prompt_presets ON user_prompt_presets(user_id, created_at);
+
                 CREATE TABLE IF NOT EXISTS redeemed_codes (
                     code TEXT PRIMARY KEY,
                     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -979,7 +989,7 @@ class UserService:
 
     def refund_pending_quota_reservations(self, *, reason: str = "startup_refund") -> int:
         with self._lock, self._connect() as conn:
-            rows = conn.execute("SELECT id FROM user_quota_reservations WHERE status = 'pending'").fetchall()
+            rows = conn.execute("SELECT id FROM user_quota_reservations WHERE status = 'pending' AND action != 'video_generate'").fetchall()
         refunded = 0
         for row in rows:
             if self.refund_quota_reservation(str(row["id"]), reason=reason, metadata={"reason": reason}):
@@ -995,7 +1005,7 @@ class UserService:
         cutoff = _now() - max(60, int(ttl_seconds or QUOTA_RESERVATION_TTL_SECONDS))
         with self._lock, self._connect() as conn:
             rows = conn.execute(
-                "SELECT id FROM user_quota_reservations WHERE status = 'pending' AND updated_at < ?",
+                "SELECT id FROM user_quota_reservations WHERE status = 'pending' AND action != 'video_generate' AND updated_at < ?",
                 (cutoff,),
             ).fetchall()
         refunded = 0
@@ -1003,6 +1013,10 @@ class UserService:
             if self.refund_quota_reservation(str(row["id"]), reason=reason, metadata={"reason": reason, "cutoff": cutoff}):
                 refunded += 1
         return refunded
+
+    def pending_video_reservations(self):
+        with self._lock, self._connect() as conn:
+            return [dict(row) for row in conn.execute("SELECT id, metadata FROM user_quota_reservations WHERE status='pending' AND action='video_generate'").fetchall()]
 
     def consume_quota(
         self,
@@ -1182,6 +1196,33 @@ class UserService:
         with self._lock, self._connect() as conn:
             cursor = conn.execute("DELETE FROM user_api_keys WHERE key = ? AND user_id = ?", (key, user_id))
             return cursor.rowcount > 0
+
+    def list_prompt_presets(self, user_id: str) -> list[dict]:
+        with self._lock, self._connect() as conn:
+            return [dict(row) for row in conn.execute("SELECT id,label,content,created_at,updated_at FROM user_prompt_presets WHERE user_id=? ORDER BY created_at,id", (user_id,)).fetchall()]
+
+    def save_prompt_preset(self, user_id: str, label: str, content: str, preset_id: str | None = None) -> dict:
+        label, content = str(label).strip(), str(content).strip()
+        if not label or len(label) > 60 or not content or len(content) > 8000:
+            raise ValueError("预设名称须为 1–60 字，内容须为 1–8000 字")
+        with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            now = _now()
+            if preset_id:
+                cursor = conn.execute("UPDATE user_prompt_presets SET label=?,content=?,updated_at=? WHERE id=? AND user_id=?", (label, content, now, preset_id, user_id))
+                if cursor.rowcount == 0:
+                    raise KeyError("预设不存在")
+            else:
+                count = conn.execute("SELECT COUNT(*) FROM user_prompt_presets WHERE user_id=?", (user_id,)).fetchone()[0]
+                if count >= 15:
+                    raise ValueError("每位用户最多保存 15 条个人预设，请先删除不需要的预设")
+                preset_id = uuid.uuid4().hex
+                conn.execute("INSERT INTO user_prompt_presets VALUES(?,?,?,?,?,?)", (preset_id, user_id, label, content, now, now))
+            return dict(conn.execute("SELECT id,label,content,created_at,updated_at FROM user_prompt_presets WHERE id=? AND user_id=?", (preset_id, user_id)).fetchone())
+
+    def delete_prompt_preset(self, user_id: str, preset_id: str) -> bool:
+        with self._lock, self._connect() as conn:
+            return conn.execute("DELETE FROM user_prompt_presets WHERE id=? AND user_id=?", (preset_id, user_id)).rowcount > 0
 
     def list_image_conversations(self, user_id: str, limit: int = 200, offset: int = 0) -> dict:
         limit = max(1, min(500, int(limit or 200)))

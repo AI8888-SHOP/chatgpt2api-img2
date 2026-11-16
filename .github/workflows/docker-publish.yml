@@ -24,7 +24,7 @@ jobs:
       - name: Install native document runtime
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libreoffice-impress fonts-noto-cjk poppler-utils
+          sudo apt-get install -y --no-install-recommends libreoffice-impress fonts-noto-cjk poppler-utils ffmpeg
           python -m pip install uv
           uv sync --frozen
       - name: Verify backend, quotas and native artifacts

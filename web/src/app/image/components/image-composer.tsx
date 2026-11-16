@@ -4,6 +4,7 @@ import { ArrowUp, ImagePlus, LoaderCircle, Pen, Sparkles, X } from "lucide-react
 import { useMemo, useState, type ClipboardEvent, type RefObject } from "react";
 
 import { ImageLightbox } from "@/components/image-lightbox";
+import { PersonalPrompts } from "@/components/personal-prompts";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -31,6 +32,7 @@ type ImageComposerProps = {
   size: string;
   outputFormat: string;
   availableQuota: string;
+  unitPrice: number;
   hasAnyGenerating: boolean;
   generatingCount: number;
   referenceImages: Array<{ name: string; dataUrl: string }>;
@@ -66,6 +68,7 @@ export function ImageComposer({
   size,
   outputFormat,
   availableQuota,
+  unitPrice,
   hasAnyGenerating,
   generatingCount,
   referenceImages,
@@ -124,7 +127,7 @@ export function ImageComposer({
           <ModeButton active={mode === "generate"} onClick={() => onModeChange("generate")}>文生图</ModeButton>
           <ModeButton active={mode === "edit"} onClick={() => onModeChange("edit")}>编辑图</ModeButton>
           <div className="studio-composer-credit">
-            积分 {availableQuota} · 每张图消耗 1 积分
+            积分 {availableQuota} · 每张图消耗 {unitPrice} 积分
           </div>
           {hasAnyGenerating ? (
             <div className="col-span-3 inline-flex items-center justify-center gap-2 rounded-full bg-amber-100 px-3 py-2 text-xs font-medium text-amber-800 sm:col-span-1">
@@ -183,6 +186,7 @@ export function ImageComposer({
           </div>
         ) : null}
 
+        <PersonalPrompts prompt={prompt} onApply={onQuickPromptSelect} />
         <div className="studio-prompt-box">
           <ImageLightbox
             images={lightboxImages}

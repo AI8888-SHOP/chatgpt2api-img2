@@ -70,7 +70,7 @@ export function ImageUpstreamsCard() {
             </div>
             <div>
               <h2 className="text-lg font-semibold tracking-tight">生图上游</h2>
-              <p className="text-sm text-stone-500">配置 OpenAI 兼容图片接口。多个启用上游会按请求轮询使用。</p>
+              <p className="text-sm text-stone-500">配置 OpenAI 兼容图片接口，同一渠道可配置多个图片模型。视频在独立区域设置。</p>
             </div>
           </div>
           <Badge variant={enabledCount > 0 ? "success" : "secondary"} className="w-fit rounded-md px-2.5 py-1">
@@ -136,12 +136,12 @@ export function ImageUpstreamsCard() {
                     <div className="space-y-2">
                       <label className="text-sm font-medium text-stone-700">支持模型（逗号分隔）</label>
                       <Input
-                        value={(item.models?.length ? item.models : [item.model]).join(", ")}
+                        value={(item.models?.length ? item.models : [item.model]).join(",")}
                         onChange={(event) => {
-                          const models = event.target.value.split(",").map((model) => model.trim()).filter(Boolean);
+                          const models = event.target.value.split(",");
                           updateItem(index, { models, model: models[0] || "" });
                         }}
-                        placeholder="gpt-image-2, gpt-image-1"
+                        placeholder="gpt-image-2,grok-imagine-image"
                         className="h-11 rounded-xl border-stone-200 bg-white"
                       />
                     </div>

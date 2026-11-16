@@ -2,6 +2,12 @@
   "auth-key": "change-me",
   "refresh_account_interval_minute": 30,
   "proxy": "",
+  "video_enabled": false,
+  "video_credits_per_second": 1,
+  "video_models": [],
+  "video_upstreams": [],
+  "default_video_model": "",
+  "video_public_base_url": "",
   "image_models": [
     { "id": "gpt-image-2", "label": "gpt-image-2", "enabled": true },
     { "id": "grok-imagine-image", "label": "grok-imagine-image", "enabled": true }

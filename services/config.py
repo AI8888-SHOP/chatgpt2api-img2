@@ -7,6 +7,7 @@ import time
 from typing import Any
 from services.prompt_optimizer_config import PromptOptimizerSettings, merge_optimizer_settings
 from services.editable_studio_config import StudioSettings, merge_studio_settings
+from services.video_config import VideoModel, VideoChannel, validate_video_config
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = BASE_DIR / "data"
@@ -573,6 +574,40 @@ class ConfigStore:
         items = [item for item in self.get_image_upstreams() if item.get("enabled")]
         return items
 
+    def get_video_upstreams(self):
+        items = []
+        for raw in self.data.get("video_upstreams") or []:
+            try:
+                items.append(VideoChannel.model_validate(raw).model_dump())
+            except ValueError:
+                continue
+        return items
+
+    def get_video_models(self):
+        items = []
+        for raw in self.data.get("video_models") or []:
+            try:
+                items.append(VideoModel.model_validate(raw).model_dump())
+            except ValueError:
+                continue
+        return items
+
+    def get_public_video_config(self):
+        channels = [item for item in self.get_video_upstreams() if item.get("enabled") and item.get("base_url") and item.get("api_key")]
+        routed = {model for channel in channels for model in channel.get("models", [])}
+        enabled = self.data.get("video_enabled") is True
+        models = [dict(item) for item in self.get_video_models() if enabled and item.get("enabled") and item["id"] in routed]
+        # A public HTTPS origin is required for upstream audio/image fetches on Ark.
+        for model in models:
+            if model["protocol"] == "seedance" and not self.data.get("video_public_base_url"):
+                model["supports_audio_upload"] = False
+                model["max_reference_images"] = 0
+        default = self.data.get("default_video_model", "")
+        if default not in {m["id"] for m in models}:
+            default = models[0]["id"] if models else ""
+        return {"video_enabled": enabled, "video_models": models, "default_video_model": default,
+                "video_credits_per_second": self.data.get("video_credits_per_second", 1)}
+
     def get_image_storage_settings(self) -> dict[str, object]:
         return _normalize_image_storage_settings(self.data.get("image_storage"))
 
@@ -582,6 +617,17 @@ class ConfigStore:
     def update(self, data: dict[str, object]) -> dict[str, object]:
         previous_data = self.data
         next_data = dict(data or {})
+        next_data.update(validate_video_config(next_data, previous_data))
+        for key, default in (("image_generate_price", 1), ("image_edit_price", 1), ("video_720p_credits_per_second", previous_data.get("video_credits_per_second", 1) * 2)):
+            value = next_data.get(key, previous_data.get(key, default))
+            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 10000:
+                raise ValueError("生成价格必须为 1–10000 的整数")
+            next_data[key] = value
+        video_price = next_data.get("video_credits_per_second", 1)
+        if isinstance(video_price, bool) or not isinstance(video_price, int) or not 1 <= video_price <= 1000:
+            raise ValueError("视频每秒积分必须为 1–1000 的整数")
+        if not isinstance(next_data.get("video_enabled", False), bool):
+            raise ValueError("视频开关必须为布尔值")
         models, default = validate_image_models(
             next_data.get("image_models", self.data.get("image_models", DEFAULT_IMAGE_MODELS)),
             next_data.get("default_image_model", self.data.get("default_image_model", "")),

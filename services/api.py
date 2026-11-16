@@ -19,6 +19,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
+from starlette.formparsers import MultiPartParser, MultiPartException
+from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from admin.api import router as admin_router
 from admin.api_key_service import init_default_admin_key
@@ -58,6 +60,7 @@ from services.image_service import ImageGenerationError
 from services.generated_image_cache_service import generated_image_cache_service
 from services.user_image_storage import GENERATED_IMAGES_DIR, ensure_generated_images_dir
 from services.version import get_app_version
+from services.video_service import VideoService, VideoRequest, VideoReconcileRequest
 from utils.helper import (
     has_response_image_generation_tool as protocol_has_response_image_generation_tool,
     is_image_chat_request as protocol_is_image_chat_request,
@@ -158,6 +161,12 @@ class CPAImportRequest(BaseModel):
 
 class SettingsUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
+
+
+class PromptPresetRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    label: str = Field(min_length=1, max_length=60)
+    content: str = Field(min_length=1, max_length=8000)
 
 
 class RegisterConfigRequest(BaseModel):
@@ -611,6 +620,8 @@ def log_user_usage(
     error: str = "",
     usage_amount: int = 0,
     upstream_name: str = "",
+    reference_images: list[dict] | None = None,
+    details: dict | None = None,
 ) -> None:
     usage_service.log(UsageRecord.create(
         api_key=user.id,
@@ -622,6 +633,9 @@ def log_user_usage(
         error=error,
         duration_ms=int((datetime.now().timestamp() - started_at) * 1000),
         upstream_name=upstream_name,
+        reference_images=reference_images,
+        usage_amount=usage_amount,
+        details=details,
     ))
 
 
@@ -640,21 +654,25 @@ def require_user_quota(user, amount: int) -> None:
         raise HTTPException(status_code=402, detail={"error": "用户积分不足，请先兑换积分"})
 
 
-def reserve_user_quota(user, amount: int, *, action: str, model: str) -> dict[str, object]:
+def reserve_user_quota(user, amount: int, *, action: str, model: str, unit_price: int | None = None) -> dict[str, object]:
     amount = max(1, int(amount or 1))
+    price_key = {"image_generate": "image_generate_price", "image_edit": "image_edit_price", "image_resume_poll": "image_generate_price", "chat_image_completion": "image_generate_price", "responses_image_generation": "image_generate_price"}.get(action)
+    unit_price = unit_price if unit_price is not None else (int(config.get().get(price_key, 1)) if price_key else 1)
+    amount *= unit_price
     reservation = user_service.reserve_quota(
         user.id,
         amount,
         action=action,
         model=model,
-        metadata={"action": action, "model": model},
+        metadata={"action": action, "model": model, "unit_price": unit_price},
     )
     if not reservation:
         raise HTTPException(status_code=402, detail={"error": "用户积分不足，请先兑换积分"})
-    return reservation
+    return {**reservation, "unit_price": unit_price}
 
 
 def settle_user_quota_reservation(reservation: dict[str, object], actual_amount: int, *, action: str, model: str) -> int:
+    actual_amount *= int(reservation.get("unit_price") or 1)
     return user_service.settle_quota_reservation(
         str(reservation.get("id") or ""),
         actual_amount,
@@ -858,6 +876,7 @@ def create_app() -> FastAPI:
     chatgpt_service = ChatGPTService()
     app_version = get_app_version()
     studio = StudioService(config, user_service, DATA_DIR / "editable_studio")
+    videos = VideoService(config, user_service, DATA_DIR / "video_jobs.db", log_user_usage)
     init_default_admin_key()
     recovered_image_jobs = _recover_unfinished_image_jobs()
     if recovered_image_jobs:
@@ -873,11 +892,13 @@ def create_app() -> FastAPI:
         reservation_thread = start_quota_reservation_watcher(stop_event)
         auto_register_thread = start_auto_register_watcher(stop_event)
         studio.start()
+        videos.start()
         try:
             yield
         finally:
             stop_event.set()
             studio.stop()
+            videos.stop()
             thread.join(timeout=1)
             reservation_thread.join(timeout=1)
             auto_register_thread.join(timeout=1)
@@ -896,6 +917,72 @@ def create_app() -> FastAPI:
     app.mount("/images", StaticFiles(directory=config.images_dir), name="images")
     router = APIRouter()
     prompt_optimizer = PromptOptimizerService(OptimizerLimits(DATA_DIR / "prompt_optimizer_limits.db"))
+    video_upload_users = set()
+
+    @router.get("/v1/video-jobs")
+    async def list_videos(authorization: str | None = Header(default=None)):
+        _, user = require_user(authorization)
+        return await run_in_threadpool(videos.list, user.id)
+
+    @router.post("/v1/video-assets")
+    async def upload_video_asset(request: Request, authorization: str | None = Header(default=None)):
+        _, user = require_user(authorization)
+        public = config.get_public_video_config()
+        if not public["video_enabled"] or not public["video_models"]:
+            raise HTTPException(400, "视频参考素材上传尚未开放")
+        require_user_quota(user, 1)
+        if user.id in video_upload_users or len(video_upload_users) >= 4:
+            raise HTTPException(429, "上传繁忙，请稍后重试")
+        video_upload_users.add(user.id)
+        form = None
+        try:
+            # Authenticate and bound the stream before multipart parsing can
+            # spool arbitrary file data to disk, including chunked requests.
+            raw = bytearray()
+            async with asyncio.timeout(60):
+                async for chunk in request.stream():
+                    if len(raw) + len(chunk) > 21 * 1024 * 1024:
+                        raise HTTPException(413, "上传内容超过 21 MB")
+                    raw.extend(chunk)
+            async def chunks():
+                yield bytes(raw)
+            form = await MultiPartParser(request.headers, chunks(), max_files=1, max_fields=1, max_part_size=1024).parse()
+            kind, file = form.get("kind"), form.get("file")
+            if kind not in {"image", "audio"} or not isinstance(file, StarletteUploadFile):
+                raise HTTPException(400, "请提供素材类型和文件")
+            capable = any(m.get("max_reference_images", 0) > 0 if kind == "image" else m.get("supports_audio_upload") for m in public["video_models"])
+            if not capable:
+                raise HTTPException(400, "当前没有可用模型支持此类参考素材")
+            content = await file.read((5 if kind == "image" else 20) * 1024 * 1024 + 1)
+            return await run_in_threadpool(videos.assets.save, user.id, content, kind)
+        except MultiPartException:
+            raise HTTPException(400, "上传格式无效，只允许一个素材文件") from None
+        except TimeoutError:
+            raise HTTPException(408, "上传超时，请重试") from None
+        finally:
+            if form is not None:
+                await form.close()
+            video_upload_users.discard(user.id)
+
+    @router.get("/video-assets/{token}")
+    async def read_video_asset(token: str):
+        path, mime = await run_in_threadpool(videos.assets.public_file, token)
+        return FileResponse(path, media_type=mime, headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})
+
+    @router.post("/v1/videos/generations", status_code=202)
+    async def create_video(body: VideoRequest, authorization: str | None = Header(default=None)):
+        _, user = require_user(authorization)
+        return await run_in_threadpool(videos.create, user, body)
+
+    @router.get("/v1/videos/generations/{request_id}")
+    async def get_video(request_id: str, authorization: str | None = Header(default=None)):
+        _, user = require_user(authorization)
+        return await run_in_threadpool(videos.get, user.id, request_id)
+
+    @router.post("/api/video-jobs/{request_id}/reconcile")
+    async def reconcile_video(request_id: str, body: VideoReconcileRequest, authorization: str | None = Header(default=None)):
+        require_auth_key(authorization)
+        return await run_in_threadpool(videos.reconcile, request_id, body)
 
     def studio_user(authorization):
         token = extract_bearer_token(authorization)
@@ -1195,6 +1282,36 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail={"error": "API key not found"})
         return {"success": True}
 
+    @router.get("/v1/user/prompt-presets")
+    async def list_prompt_presets(authorization: str | None = Header(default=None)):
+        _, user = require_user(authorization)
+        return JSONResponse({"items": await run_in_threadpool(user_service.list_prompt_presets, user.id), "limit": 15}, headers={"Cache-Control": "private, no-store"})
+
+    @router.post("/v1/user/prompt-presets", status_code=201)
+    async def create_prompt_preset(body: PromptPresetRequest, authorization: str | None = Header(default=None)):
+        _, user = require_user(authorization)
+        try:
+            return await run_in_threadpool(user_service.save_prompt_preset, user.id, body.label, body.content)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+
+    @router.put("/v1/user/prompt-presets/{preset_id}")
+    async def update_prompt_preset(preset_id: str, body: PromptPresetRequest, authorization: str | None = Header(default=None)):
+        _, user = require_user(authorization)
+        try:
+            return await run_in_threadpool(user_service.save_prompt_preset, user.id, body.label, body.content, preset_id)
+        except KeyError:
+            raise HTTPException(404, "预设不存在") from None
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+
+    @router.delete("/v1/user/prompt-presets/{preset_id}")
+    async def delete_prompt_preset(preset_id: str, authorization: str | None = Header(default=None)):
+        _, user = require_user(authorization)
+        if not await run_in_threadpool(user_service.delete_prompt_preset, user.id, preset_id):
+            raise HTTPException(404, "预设不存在")
+        return {"ok": True}
+
     @router.get("/v1/image-conversations")
     async def list_user_image_conversations(
             limit: int = 200,
@@ -1236,10 +1353,14 @@ def create_app() -> FastAPI:
     async def get_app_config():
         return JSONResponse({
             "site_title": config.get_site_title(),
+            "image_generate_price": config.get().get("image_generate_price", 1),
+            "image_edit_price": config.get().get("image_edit_price", 1),
+            "video_720p_credits_per_second": config.get().get("video_720p_credits_per_second", config.get().get("video_credits_per_second", 1) * 2),
             "quick_prompts": config.get_quick_prompts(),
             "psd_task_price": config.psd_task_price,
             "image_models": config.get_public_image_models(),
             "default_image_model": config.get_default_image_model(),
+            **config.get_public_video_config(),
         }, headers={"Cache-Control": "no-store"})
 
     @router.get("/api/settings")
@@ -1260,7 +1381,7 @@ def create_app() -> FastAPI:
         except ImageModelsConfigError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from None
         except ValueError:
-            raise HTTPException(status_code=400, detail={"error": "提示词优化配置无效，请检查地址、密钥、模型和限额范围"}) from None
+            raise HTTPException(status_code=400, detail={"error": "配置无效，请检查地址、密钥、模型和限额范围"}) from None
 
     @router.get("/api/accounts")
     async def get_accounts(authorization: str | None = Header(default=None)):
@@ -1573,6 +1694,7 @@ def create_app() -> FastAPI:
         usage_metadata = build_image_cache_metadata(api_key, action="image_generate", model=body.model)
         job = _get_image_job(job_id) or {}
         reservation = {"id": job.get("reservation_id") or "", "amount": int(job.get("reserved_amount") or body.n)}
+        reservation["unit_price"] = job.get("unit_price", 1)
         _update_image_job(job_id, status="running", can_resume=False, progress="running", progress_text=_image_progress_text("running"))
         try:
             result = chatgpt_service.generate_with_pool(
@@ -1652,8 +1774,12 @@ def create_app() -> FastAPI:
         usage_metadata = build_image_cache_metadata(api_key, action="image_edit", model=model)
         job = _get_image_job(job_id) or {}
         reservation = {"id": job.get("reservation_id") or "", "amount": int(job.get("reserved_amount") or n)}
+        reservation["unit_price"] = job.get("unit_price", 1)
         _update_image_job(job_id, status="running", can_resume=False, progress="running", progress_text=_image_progress_text("running"))
+        references = []
         try:
+            references = usage_service.save_reference_images(images)
+            _update_image_job(job_id, reference_images=references)
             result = chatgpt_service.edit_with_pool(
                 prompt,
                 images,
@@ -1676,6 +1802,7 @@ def create_app() -> FastAPI:
                 status="success",
                 started_at=start_time,
                 upstream_name=usage_metadata["upstream_name"],
+                reference_images=references,
                 usage_amount=usage_amount,
             )
             _update_image_job(job_id, status="success", result=result, error="", can_resume=False, progress="success", progress_text=_image_progress_text("success"))
@@ -1689,6 +1816,7 @@ def create_app() -> FastAPI:
                 status="failed",
                 started_at=start_time,
                 upstream_name=usage_metadata["upstream_name"],
+                reference_images=references,
                 error=str(exc),
             )
             conversation_id = str(getattr(exc, "conversation_id", "") or "")
@@ -1718,12 +1846,14 @@ def create_app() -> FastAPI:
                 status="failed",
                 started_at=start_time,
                 upstream_name=usage_metadata["upstream_name"],
+                reference_images=references,
                 error=str(exc),
             )
             _update_image_job(job_id, status="error", error=str(exc), can_resume=False, progress="error", progress_text=_image_progress_text("error"))
 
     def run_resume_image_job(job_id: str, api_key, extra_timeout_secs: int) -> None:
         job = _get_image_job(job_id) or {}
+        references = job.get("reference_images") or []
         prompt = str(job.get("resume_prompt") or "")
         model = str(job.get("resume_model") or "auto")
         access_token = str(job.get("resume_access_token") or "")
@@ -1735,7 +1865,7 @@ def create_app() -> FastAPI:
 
         _update_image_job(job_id, status="running", error="", can_resume=False, progress="polling_image_result", progress_text=_image_progress_text("polling_image_result"))
         try:
-            reservation = reserve_user_quota(api_key, 1, action="image_resume_poll", model=model)
+            reservation = reserve_user_quota(api_key, 1, action="image_resume_poll", model=model, unit_price=int(job.get("unit_price") or 1))
             result = chatgpt_service.resume_image_poll(
                 access_token,
                 device_id,
@@ -1760,6 +1890,7 @@ def create_app() -> FastAPI:
                 status="success",
                 started_at=start_time,
                 upstream_name=usage_metadata["upstream_name"],
+                reference_images=references,
                 usage_amount=usage_amount,
             )
             _update_image_job(
@@ -1781,6 +1912,7 @@ def create_app() -> FastAPI:
                 status="failed",
                 started_at=start_time,
                 upstream_name=usage_metadata["upstream_name"],
+                reference_images=references,
                 error=str(exc),
             )
             still_timeout = "超时" in str(exc)
@@ -1821,7 +1953,7 @@ def create_app() -> FastAPI:
             client_conversation_id=body.client_conversation_id,
             client_image_id=body.client_image_id,
         )
-        _update_image_job(job_id, reservation_id=reservation.get("id"), reserved_amount=reservation.get("amount"))
+        _update_image_job(job_id, reservation_id=reservation.get("id"), reserved_amount=reservation.get("amount"), unit_price=reservation.get("unit_price", 1))
         Thread(target=run_generation_job, args=(job_id, api_key, body), daemon=True).start()
         return {"job_id": job_id, "status": "pending"}
 
@@ -1859,7 +1991,7 @@ def create_app() -> FastAPI:
             client_conversation_id=client_conversation_id,
             client_image_id=client_image_id,
         )
-        _update_image_job(job_id, reservation_id=reservation.get("id"), reserved_amount=reservation.get("amount"))
+        _update_image_job(job_id, reservation_id=reservation.get("id"), reserved_amount=reservation.get("amount"), unit_price=reservation.get("unit_price", 1))
         Thread(target=run_edit_job, args=(job_id, api_key, prompt, images, model, n), daemon=True).start()
         return {"job_id": job_id, "status": "pending"}
 
@@ -1988,7 +2120,9 @@ def create_app() -> FastAPI:
 
         reservation = reserve_user_quota(api_key, n, action="image_edit", model=model)
         usage_metadata = build_image_cache_metadata(api_key, action="image_edit", model=model)
+        references = []
         try:
+            references = usage_service.save_reference_images(images)
             result = await run_in_threadpool(
                 chatgpt_service.edit_with_pool,
                 prompt,
@@ -2011,6 +2145,7 @@ def create_app() -> FastAPI:
                 status="success",
                 started_at=start_time,
                 upstream_name=usage_metadata["upstream_name"],
+                reference_images=references,
                 usage_amount=usage_amount,
             )
             return result
@@ -2024,6 +2159,7 @@ def create_app() -> FastAPI:
                 status="failed",
                 started_at=start_time,
                 upstream_name=usage_metadata["upstream_name"],
+                reference_images=references,
                 error=str(exc),
             )
             raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
@@ -2037,6 +2173,7 @@ def create_app() -> FastAPI:
                 status="failed",
                 started_at=start_time,
                 upstream_name=usage_metadata["upstream_name"],
+                reference_images=references,
                 error=str(exc),
             )
             raise

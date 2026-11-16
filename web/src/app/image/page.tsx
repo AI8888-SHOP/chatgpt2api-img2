@@ -9,6 +9,7 @@ import { ImageComposer } from "@/app/image/components/image-composer";
 import { ImageResults } from "@/app/image/components/image-results";
 import { ImageSidebar } from "@/app/image/components/image-sidebar";
 import { MaskEditor } from "@/app/image/components/mask-editor";
+import { VideoWorkspace } from "@/app/image/components/video-workspace";
 import { ImageLightbox } from "@/components/image-lightbox";
 import { SideDrawer } from "@/components/ui/side-drawer";
 import {
@@ -230,6 +231,19 @@ async function resultImageToReference(src: string, index: number): Promise<Store
 }
 
 export default function ImagePage() {
+  const [mode, setMode] = useState<"image" | "video">("image");
+  const [videoOpened, setVideoOpened] = useState(false);
+  return <>
+    <nav aria-label="创作类型" className="mb-3 flex gap-2">
+      <button type="button" aria-pressed={mode === "image"} className="rounded-lg border px-5 py-2 text-sm aria-pressed:border-primary aria-pressed:bg-primary aria-pressed:text-primary-foreground" onClick={() => setMode("image")}>生成图片</button>
+      <button type="button" aria-pressed={mode === "video"} className="rounded-lg border px-5 py-2 text-sm aria-pressed:border-primary aria-pressed:bg-primary aria-pressed:text-primary-foreground" onClick={() => { setVideoOpened(true); setMode("video"); }}>生成视频</button>
+    </nav>
+    <div hidden={mode !== "image"}><ImageWorkspace /></div>
+    {videoOpened && <div hidden={mode !== "video"}><VideoWorkspace /></div>}
+  </>;
+}
+
+function ImageWorkspace() {
   const { variant } = useDesign();
   const [canvasTurnId, setCanvasTurnId] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -270,6 +284,7 @@ export default function ImagePage() {
   const [isLoadingHistory, setIsLoadingHistory] = useState(true);
   const [generatingIds, setGeneratingIds] = useState<Set<string>>(new Set());
   const [availableQuota, setAvailableQuota] = useState("加载中");
+  const [imagePrices, setImagePrices] = useState({ generate: 1, edit: 1 });
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [lightboxIndex, setLightboxIndex] = useState(0);
   const [maskEditorImage, setMaskEditorImage] = useState<string | null>(null);
@@ -417,6 +432,7 @@ export default function ImagePage() {
         const prompts = Array.isArray(data.quick_prompts) ? data.quick_prompts : [];
         if (!cancelled && currentRevision === revision) {
           setAvailableModels(models);
+          setImagePrices({ generate: data.image_generate_price ?? 1, edit: data.image_edit_price ?? 1 });
           setDefaultModel(fallback);
           setImageModel(current => models.some(item => item.id === current) ? current : fallback);
           setModelsError(models.length ? "" : "暂无可用模型，请联系管理员开放模型");
@@ -1153,6 +1169,7 @@ export default function ImagePage() {
       size={imageSize}
       outputFormat={imageOutputFormat}
       availableQuota={availableQuota}
+      unitPrice={referenceImages.length ? imagePrices.edit : imagePrices.generate}
       hasAnyGenerating={hasAnyGenerating}
       generatingCount={generatingIds.size}
       referenceImages={referenceImages}

@@ -5,6 +5,9 @@
 from datetime import datetime
 from services.display_time import format_display_time
 from fastapi import APIRouter, HTTPException, Header, Query
+from fastapi.responses import Response
+from io import BytesIO
+from PIL import Image, ImageOps
 from pydantic import BaseModel, Field
 from services.admin_audit_service import admin_audit_service
 from services.api_key_service import api_key_service
@@ -438,6 +441,25 @@ async def get_usage_stats(
     
     stats = usage_service.get_stats(api_key=api_key, days=days)
     return stats
+
+@router.get("/usage/reference-images/{image_id}")
+def get_usage_reference_image(image_id: str, authorization: str | None = Header(default=None)):
+    require_admin(authorization)
+    try:
+        path = usage_service.reference_image_path(image_id)
+    except FileNotFoundError:
+        raise HTTPException(404, detail="原图不存在或记录已清理")
+    try:
+        with Image.open(path) as source:
+            if source.width * source.height > 40_000_000:
+                raise ValueError()
+            preview = ImageOps.exif_transpose(source).convert("RGB")
+            preview.thumbnail((1600, 1600))
+            output = BytesIO()
+            preview.save(output, "JPEG", quality=90)
+    except Exception:
+        raise HTTPException(422, detail="原图已保留，但无法生成预览")
+    return Response(output.getvalue(), media_type="image/jpeg", headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})
 
 @router.get("/usage/records")
 async def get_usage_records(

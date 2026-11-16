@@ -4,6 +4,35 @@ export type AccountType = "Free" | "Plus" | "Pro" | "Team" | "Enterprise";
 export type AccountStatus = "正常" | "限流" | "异常" | "禁用";
 export type ImageModel = string;
 export type ImageModelConfig = { id: string; label: string; enabled?: boolean };
+export type PersonalPrompt = { id: string; label: string; content: string; created_at: number; updated_at: number };
+export const fetchPersonalPrompts = () => httpRequest<{ items: PersonalPrompt[]; limit: number }>("/v1/user/prompt-presets", { authScope: "user" });
+export const savePersonalPrompt = (body: { label: string; content: string }, id?: string) => httpRequest<PersonalPrompt>(`/v1/user/prompt-presets${id ? '/' + encodeURIComponent(id) : ''}`, { method: id ? "PUT" : "POST", body, authScope: "user" });
+export const deletePersonalPrompt = (id: string) => httpRequest<{ ok: boolean }>(`/v1/user/prompt-presets/${encodeURIComponent(id)}`, { method: "DELETE", authScope: "user" });
+export type VideoModelConfig = {
+  id: string; label: string; enabled: boolean; protocol: "grok" | "seedance";
+  max_reference_images: number; supports_voice: boolean; supports_audio_upload: boolean;
+  min_duration: number; max_duration: number; reference_max_duration: number;
+  resolutions: ("480p" | "720p")[];
+};
+export type VideoChannelConfig = { name: string; base_url: string; api_key: string; models: string[]; enabled: boolean };
+export type VideoJob = {
+  request_id: string; status: string; created_at: number; credits: number;
+  prompt: string; model: string; duration: number; resolution: string; aspect_ratio: string;
+  mode: string; accounted: boolean; error?: string; video?: { url: string };
+};
+export type VideoGenerationParams = {
+  model: string; prompt: string; duration: number; aspect_ratio: string; resolution: string;
+  mode: "text" | "image" | "reference"; generate_audio: boolean; client_request_id: string;
+  reference_images: { asset_id: string }[]; reference_audios: { asset_id?: string; voice_id?: string }[];
+};
+
+export const createVideoJob = (body: VideoGenerationParams) => httpRequest<VideoJob>("/v1/videos/generations", { method: "POST", body, authScope: "user", timeout: 60000 });
+export const fetchVideoJobs = () => httpRequest<{ items: VideoJob[] }>("/v1/video-jobs", { authScope: "user", timeout: 15000 });
+export const fetchVideoJob = (id: string) => httpRequest<VideoJob>(`/v1/videos/generations/${encodeURIComponent(id)}`, { authScope: "user", timeout: 15000 });
+export function uploadVideoAsset(file: File, kind: "image" | "audio") {
+  const body = new FormData(); body.append("file", file); body.append("kind", kind);
+  return httpRequest<{ asset_id: string; kind: string; size: number }>("/v1/video-assets", { method: "POST", body, authScope: "user", timeout: 60000 });
+}
 
 export type Account = {
   id: string;
@@ -58,6 +87,15 @@ export type SettingsConfig = {
   image_models?: ImageModelConfig[];
   default_image_model?: string;
   image_upstream_cooldown_secs?: number;
+  video_enabled?: boolean;
+  video_credits_per_second?: number;
+  video_720p_credits_per_second?: number;
+  image_generate_price?: number;
+  image_edit_price?: number;
+  video_models?: VideoModelConfig[];
+  video_upstreams?: VideoChannelConfig[];
+  default_video_model?: string;
+  video_public_base_url?: string;
   quick_prompts?: QuickPromptConfig[];
   "auth-key"?: string;
   default_user_quota?: number;
@@ -81,6 +119,13 @@ export type SettingsConfig = {
 };
 
 export type PublicAppConfig = {
+  video_enabled?: boolean;
+  video_models?: VideoModelConfig[];
+  default_video_model?: string;
+  video_credits_per_second?: number;
+  video_720p_credits_per_second?: number;
+  image_generate_price?: number;
+  image_edit_price?: number;
   site_title: string;
   quick_prompts?: QuickPromptConfig[];
   psd_task_price?: number;
@@ -1026,6 +1071,9 @@ export type ApiKeySummary = {
 };
 
 export type UsageRecordItem = {
+  reference_images?: { id: string; name: string; size: number }[];
+  usage_amount?: number;
+  details?: { duration?: number; resolution?: string; mode?: string };
   id: string;
   api_key: string;
   api_key_name: string;

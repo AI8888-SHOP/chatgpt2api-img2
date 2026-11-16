@@ -9,7 +9,7 @@ import type { ImageModelConfig } from "@/lib/api";
 import { useSettingsStore } from "../store";
 
 export function ImageModelsCard() {
-  const { config, isLoadingConfig, isSavingConfig, saveConfig } = useSettingsStore();
+  const { config, isLoadingConfig, isSavingConfig, saveConfig, setConfigValue } = useSettingsStore();
   const items = config?.image_models || [];
   const defaultModel = config?.default_image_model || "";
   const update = (next: ImageModelConfig[], selected = defaultModel) => {
@@ -31,6 +31,10 @@ export function ImageModelsCard() {
 
   return <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm" data-testid="image-models-card">
     <CardContent className="space-y-5 p-6">
+      <fieldset disabled={!config || isLoadingConfig || isSavingConfig} className="flex flex-wrap gap-4">
+        <label className="space-y-1 text-sm">文生图每张积分<Input aria-label="文生图每张积分" type="number" min={1} max={10000} value={config?.image_generate_price ?? 1} onChange={e => setConfigValue("image_generate_price", Math.max(1, Math.min(10000, Math.trunc(Number(e.target.value) || 1))))} /></label>
+        <label className="space-y-1 text-sm">图生图每张积分<Input aria-label="图生图每张积分" type="number" min={1} max={10000} value={config?.image_edit_price ?? 1} onChange={e => setConfigValue("image_edit_price", Math.max(1, Math.min(10000, Math.trunc(Number(e.target.value) || 1))))} /></label>
+      </fieldset>
       <div>
         <h2 className="text-lg font-semibold tracking-tight">前端可用模型</h2>
         <p className="text-sm text-stone-500">控制绘图页面的模型名称、顺序和默认选项。自定义模型 ID 需与下方已接入的生图上游一致。</p>
