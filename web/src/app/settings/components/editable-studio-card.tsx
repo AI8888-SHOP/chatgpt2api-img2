@@ -21,7 +21,7 @@ const fields = [
   ["max_image_pixels", "每张图片最大像素数", 1000000, 24000000], ["max_reference_images", "PPT 最多参考图", 1, 8], ["max_file_mb", "每个生成文件最大 MB", 5, 300],
   ["max_storage_mb", "工作室总存储预算 MB（含执行预留）", 256, 51200], ["render_memory_mb", "单个渲染进程虚拟内存上限 MB", 768, 4096],
   ["min_quota", "最低积分余额", 0, 100000], ["min_account_age_seconds", "新账号等待时间（秒）", 0, 2592000],
-  ["ppt_page_price", "PPT 每页积分", 0, 10000], ["psd_task_price", "PSD 每任务积分", 0, 100000], ["retention_days", "文件保留天数", 1, 90],
+  ["retention_days", "文件保留天数", 1, 90],
 ] as const;
 type Stats = { daily_tokens: number; jobs: { status: string; count: number }[]; recent: { id: string; kind: string; status: string; phase: string; error: string; actual_tokens: number | null }[] };
 
@@ -36,6 +36,15 @@ export function EditableStudioCard() {
   return <Card><CardContent className="space-y-5 p-6">
     <div className="flex gap-3"><FileSliders className="size-5" /><div><h2 className="text-lg font-semibold">PPT / PSD 文档工作室 · 独立 API</h2><p className="text-sm text-stone-500">AI 分析与内容制作，受控程序导出真实可编辑文件。不使用 ChatGPT 账号池。</p></div></div>
     <fieldset disabled={!config || saving} className="space-y-5">
+      <section className="space-y-3 rounded-xl border p-4" aria-label="PPT PSD 积分价格">
+        <h3 className="font-semibold">PPT / PSD 积分价格</h3>
+        <div className="grid gap-4 md:grid-cols-2">
+          <label className="space-y-2 text-sm">PPT 每页积分<Input aria-label="PPT 每页积分" type="number" min={0} max={10000} step={1} value={Number(settings.ppt_page_price ?? 1)} onChange={e => patch({ ppt_page_price: Number(e.target.value) })} /></label>
+          <label className="space-y-2 text-sm">PSD 每任务积分<Input aria-label="PSD 每任务积分" type="number" min={0} max={100000} step={1} value={Number(settings.psd_task_price ?? 1)} onChange={e => patch({ psd_task_price: Number(e.target.value) })} /></label>
+        </div>
+        <p className="text-xs text-stone-500">PPT 按确认方案的页数 × 每页单价；PSD 每次拆分任务固定收费，不按图层数量累加。0 表示免费。优化需求与生成方案不扣生成积分；确认制作后预扣，失败自动退回。</p>
+        <Button type="button" onClick={() => void save()} disabled={saving}>{saving ? "保存中…" : "保存 PPT / PSD 价格"}</Button>
+      </section>
       <label className="flex gap-3 text-sm"><input type="checkbox" checked={settings.enabled} onChange={e => patch({ enabled: e.target.checked })} />启用 API 文档工作室</label>
       <p className="text-xs leading-6 text-stone-500">“优化需求”仅整理文字，使用“提示词优化 API”的启用开关、连接与共享限额，最多 30 秒、输入 2048 / 输出 512 Token（管理员设置更低时取更低值）。“生成方案”和文件制作使用本卡配置；不启用文本优化也可生成方案。</p>
       <label className="flex gap-3 text-sm"><input type="checkbox" checked={settings.reuse_optimizer_connection} onChange={e => patch({ reuse_optimizer_connection: e.target.checked })} />复用提示词优化的 API 地址、密钥、模型（不受其启用开关影响）</label>
@@ -46,7 +55,7 @@ export function EditableStudioCard() {
         <label className="flex items-center gap-3 text-sm"><input type="checkbox" checked={!!settings.clear_api_key} onChange={e => patch({ clear_api_key: e.target.checked, ...(e.target.checked ? { api_key: "", enabled: false } : {}) })} />清除密钥并停用</label>
       </div>}
       <div className="grid gap-4 md:grid-cols-2"><label className="space-y-2 text-sm">协议<select className="block w-full rounded-md border p-2" value={settings.protocol} onChange={e => patch({ protocol: e.target.value })}><option value="responses">Responses API</option><option value="chat_completions">Chat Completions（视觉模型）</option></select></label><label className="space-y-2 text-sm">思考强度<select className="block w-full rounded-md border p-2" value={settings.reasoning_effort} onChange={e => patch({ reasoning_effort: e.target.value })}><option value="low">low</option><option value="medium">medium</option><option value="high">high</option></select></label></div>
-      <details><summary className="cursor-pointer text-sm font-semibold">用户限流、Token 预算、文件限制与积分价格</summary><div className="mt-4 grid gap-4 md:grid-cols-2">{fields.map(([key, label, min, max]) => <label className="space-y-2 text-sm" key={key}>{label}<Input type="number" min={min} max={max} step={1} value={Number(settings[key] ?? min)} onChange={e => patch({ [key]: Number(e.target.value) })} /></label>)}</div></details>
+      <details><summary className="cursor-pointer text-sm font-semibold">用户限流、Token 预算与文件限制</summary><div className="mt-4 grid gap-4 md:grid-cols-2">{fields.map(([key, label, min, max]) => <label className="space-y-2 text-sm" key={key}>{label}<Input type="number" min={min} max={max} step={1} value={Number(settings[key] ?? min)} onChange={e => patch({ [key]: Number(e.target.value) })} /></label>)}</div></details>
       <p className="text-xs leading-6 text-stone-500">预算按用户 ID 计数，跨会话和重启生效。UTC 零点重置。先预留输入、图片、上游额外指令与最大输出；成功按上游用量结算，未知用量保留预算。失败请求也计次。生成积分与任务状态在同一数据库事务中扣除或退回。仅支持网页登录，但仍需依靠后端预算限制自动化滥用。</p>
       <p className="text-xs leading-6 text-stone-500">PSD 为视觉引导的原图像素分层，文字不会伪装成可编辑字体。近似背景修补不代表恢复原始遮挡信息。AI 不直接执行代码，文件下载校验所属用户。</p>
       <div className="flex justify-end"><Button disabled={!config || saving} onClick={() => void save()}>{saving ? <LoaderCircle className="size-4 animate-spin" /> : <Save className="size-4" />}保存工作室配置</Button></div>
