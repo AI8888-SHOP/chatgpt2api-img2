@@ -27,8 +27,8 @@ class VideoModel(BaseModel):
 
     @model_validator(mode="after")
     def capabilities(self):
-        if self.protocol != "native" and (self.supports_video_reference or self.supports_edit or self.supports_extend or "1080p" in self.resolutions):
-            raise ValueError("参考视频、编辑/延长和1080p目前仅支持原生视频协议")
+        if self.protocol != "native" and (self.supports_video_reference or self.supports_edit or self.supports_extend):
+            raise ValueError("参考视频、编辑/延长目前仅支持原生视频协议")
         if self.min_duration > self.max_duration or not self.min_duration <= self.reference_max_duration <= self.max_duration:
             raise ValueError("视频时长范围无效")
         if self.protocol == "grok" and self.supports_audio_upload:

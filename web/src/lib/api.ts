@@ -21,6 +21,7 @@ export type VideoJob = {
   request_id: string; status: string; created_at: number; credits: number;
   prompt: string; model: string; duration: number; resolution: string; aspect_ratio: string;
   mode: string; accounted: boolean; error?: string; video?: { url: string; local?: boolean };
+  remote_id?: string; diagnostics?: { time: number; phase: string; http_status: number | null; error_type: string; error_code: string; diagnostic_id: string; upstream_id: string; summary: string }[];
 };
 export type VideoGenerationParams = {
   model: string; prompt: string; duration: number; aspect_ratio: string; resolution: string;

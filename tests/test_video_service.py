@@ -37,6 +37,7 @@ class VideoTests(unittest.TestCase):
             return db.execute("SELECT * FROM video_jobs WHERE id=?", (job_id,)).fetchone()
 
     def tick(self, job_id, data=None, status=200, error=None):
+        self.service.update(job_id, next_poll=0)
         response = Mock(status_code=status)
         response.json.return_value = data
         with patch("services.video_service.requests.Session") as factory:
@@ -184,6 +185,101 @@ class VideoTests(unittest.TestCase):
         self.service.reconcile(job_id, VideoReconcileRequest(confirmed_failed=True))
         self.tick(job_id)
         self.assertEqual(self.users.get_user(self.user.id).quota, 100)
+
+    def test_explicit_rejection_refund_is_idempotent(self):
+        job_id = self.create()
+        self.tick(job_id, {"error": {"type": "invalid_request_error"}}, status=422)
+        self.assertEqual(self.row(job_id)["state"], "failed")
+        self.tick(job_id)
+        self.tick(job_id)
+        self.assertEqual(self.users.get_user(self.user.id).quota, 100)
+        self.assertTrue(self.row(job_id)["accounted"])
+
+    def test_502_stays_unknown_and_evidence_reconcile_is_idempotent(self):
+        job_id = self.create()
+        self.tick(job_id, {"error": {"type": "upstream_error", "message": "all routes failed"}}, status=502)
+        self.assertEqual(self.row(job_id)["state"], "unknown")
+        self.tick(job_id).post.assert_not_called()
+        self.assertEqual(self.users.get_user(self.user.id).quota, 95)
+        body = VideoReconcileRequest(confirmed_failed=True, note="gateway evidence: upstream 422; request audit-123")
+        self.service.reconcile(job_id, body)
+        self.service.reconcile(job_id, body)
+        self.tick(job_id)
+        self.service.reconcile(job_id, body)
+        self.tick(job_id)
+        self.assertEqual(self.users.get_user(self.user.id).quota, 100)
+        with self.service.connect() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM video_reconciliations").fetchone()[0], 1)
+
+    def test_diagnostics_are_bounded_structural_and_secret_free(self):
+        job_id = self.create()
+        response = Mock(status_code=502, headers={"X-Upstream-Ops-Request-Id": "gateway-123"})
+        response.json.return_value = {"error": {"type": "upstream_error", "code": "invalid_request", "request_id": "upstream-456", "message": "private-key https://files.test/a?signature=secret data:image/png;base64,AAAA"}, "prompt": "sensitive prompt"}
+        for _ in range(12):
+            self.service.record_diagnostic(job_id, "create", response, secret="private-key")
+        result = self.service.get(self.user.id, job_id)
+        self.assertEqual(len(result["diagnostics"]), 8)
+        last = result["diagnostics"][-1]
+        self.assertEqual(last["http_status"], 502)
+        self.assertEqual(last["diagnostic_id"], "gateway-123")
+        self.assertEqual(last["upstream_id"], "upstream-456")
+        for secret in ("private-key", "https://", "base64", "sensitive prompt", "signature"):
+            self.assertNotIn(secret, json.dumps(result))
+
+    def test_grok_1080p_image_contract_and_restart_protocol_snapshot(self):
+        self.config.update({**self.config.get(), "video_models": [{"id": "grok-imagine-video", "protocol": "grok", "resolutions": ["1080p"], "price_1080p": 2}]})
+        with patch.object(self.service.assets, "resolve", return_value="https://files.test/image.png"):
+            job_id = self.service.create(self.user, VideoRequest(prompt="x", resolution="1080p", mode="image", reference_images=[{"asset_id": "a" * 32}]))["request_id"]
+        session = self.tick(job_id, {"request_id": "grok-task"}, status=202)
+        payload = session.post.call_args.kwargs["json"]
+        self.assertEqual(payload["duration"], 5)
+        self.assertEqual(payload["resolution"], "1080p")
+        self.assertEqual(payload["image"], {"url": "https://files.test/image.png"})
+        self.assertNotIn("seconds", payload)
+        self.config.update({**self.config.get(), "video_models": [{"id": "grok-imagine-video", "protocol": "native"}]})
+        with patch("services.video_service.Thread"):
+            self.service.start()
+        session = self.tick(job_id, {"status": "done", "video": {"url": "https://cdn.test/video.mp4"}})
+        self.assertTrue(session.get.call_args.args[0].endswith("/videos/generations/grok-task"))
+        session.post.assert_not_called()
+        self.tick(job_id)
+        self.assertEqual(self.users.get_user(self.user.id).quota, 90)
+
+    def test_success_without_id_and_error_request_id_are_not_tasks(self):
+        job_id = self.create()
+        self.tick(job_id, {"request_id": "diagnostic-only", "error": {"type": "upstream_error"}})
+        self.assertEqual(self.row(job_id)["state"], "unknown")
+        self.assertIsNone(self.row(job_id)["remote_id"])
+        self.tick(job_id).post.assert_not_called()
+
+    def test_missing_id_and_enveloped_grok_compatibility(self):
+        job_id = self.create()
+        self.tick(job_id, {"status": "queued"})
+        self.assertEqual(self.row(job_id)["state"], "unknown")
+        self.tick(job_id).post.assert_not_called()
+        # A separate synthetic job is unnecessary: reset only this mock fixture.
+        self.service.update(job_id, state="queued")
+        self.tick(job_id, {"data": {"request_id": "nested-task"}})
+        self.assertEqual(self.row(job_id)["remote_id"], "nested-task")
+
+    def test_poll_backoff_never_recreates(self):
+        job_id = self.create()
+        self.tick(job_id, {"request_id": "remote"})
+        self.tick(job_id, {}, status=502).post.assert_not_called()
+        self.assertGreater(self.row(job_id)["next_poll"], time.time() + 50)
+        with patch("services.video_service.requests.Session") as session:
+            self.service.tick(self.row(job_id))
+            session.assert_not_called()
+        self.assertEqual(self.row(job_id)["state"], "pending")
+
+    def test_grok_prefers_public_asset_url_when_configured(self):
+        content = io.BytesIO()
+        Image.new("RGB", (4, 4)).save(content, format="PNG")
+        asset = self.service.assets.save(self.user.id, content.getvalue(), "image")
+        self.config.update({**self.config.get(), "video_public_base_url": "https://public.example"})
+        url = self.service.assets.resolve(self.user.id, asset["asset_id"], "image", "grok")
+        self.assertTrue(url.startswith("https://public.example/video-assets/"))
+        self.assertNotIn("base64", url)
 
     def test_disabled_changed_channel_and_concurrency(self):
         job_id = self.create()

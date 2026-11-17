@@ -97,9 +97,9 @@ class VideoAssets:
             row = db.execute("SELECT * FROM video_assets WHERE id=? AND owner=? AND kind=? AND expires>?", (asset_id, owner, kind, time.time())).fetchone()
         if not row:
             raise HTTPException(400, "参考素材不存在、已过期或不属于当前用户，请重新上传")
-        if protocol == "grok" and kind == "image":
-            return "data:image/jpeg;base64," + base64.b64encode((self.root / asset_id).read_bytes()).decode()
         base = self.service.config.get().get("video_public_base_url", "")
+        if protocol == "grok" and kind == "image" and not base:
+            return "data:image/jpeg;base64," + base64.b64encode((self.root / asset_id).read_bytes()).decode()
         if not base:
             raise HTTPException(400, "管理员尚未配置视频素材公网地址")
         return base.rstrip("/") + "/video-assets/" + row["token"]

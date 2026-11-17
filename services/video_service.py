@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import sqlite3
 import time
 import uuid
@@ -56,6 +57,7 @@ class VideoReconcileRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     remote_id: str | None = Field(default=None, min_length=1, max_length=512)
     confirmed_failed: bool = False
+    note: str = Field(default="", max_length=500)
 
 
 def channel_key(channel):
@@ -97,6 +99,9 @@ class VideoService:
                 db.execute("ALTER TABLE video_jobs ADD COLUMN next_poll REAL NOT NULL DEFAULT 0")
             if "diagnostic_id" not in columns:
                 db.execute("ALTER TABLE video_jobs ADD COLUMN diagnostic_id TEXT NOT NULL DEFAULT ''")
+            if "diagnostics" not in columns:
+                db.execute("ALTER TABLE video_jobs ADD COLUMN diagnostics TEXT NOT NULL DEFAULT '[]'")
+            db.execute("CREATE TABLE IF NOT EXISTS video_reconciliations (id INTEGER PRIMARY KEY, job_id TEXT NOT NULL, created REAL NOT NULL, remote_id TEXT, confirmed_failed INTEGER NOT NULL, note TEXT NOT NULL)")
             db.execute("CREATE UNIQUE INDEX IF NOT EXISTS video_client_requests ON video_jobs(owner,client_request_id)")
         self.assets = VideoAssets(self)
 
@@ -121,6 +126,10 @@ class VideoService:
                 self.users.refund_quota_reservation(reservation["id"], reason="video_setup_interrupted")
         with self.connect() as db:
             db.execute("UPDATE video_jobs SET state='failed', error='任务准备被中断，已退回积分' WHERE state='preparing'")
+            for row in db.execute("SELECT id,payload FROM video_jobs WHERE state='submitting'").fetchall():
+                payload = json.loads(row["payload"])
+                payload.pop("upstream_payload", None)
+                db.execute("UPDATE video_jobs SET payload=? WHERE id=?", (json.dumps(payload), row["id"]))
             db.execute("UPDATE video_jobs SET state='unknown', error='提交结果未知，请联系管理员核对；不会自动重试' WHERE state='submitting'")
         self.stop_event.clear()
         self.thread = Thread(target=self.run, daemon=True, name="video-jobs")
@@ -268,6 +277,8 @@ class VideoService:
         payload = json.loads(row["payload"])
         response.update({key: payload.get(key) for key in ("prompt", "model", "duration", "resolution", "aspect_ratio", "mode")})
         response["accounted"] = bool(row["accounted"])
+        response["diagnostics"] = json.loads(row["diagnostics"])
+        response["remote_id"] = row["remote_id"]
         if row["result"]:
             response["video"] = json.loads(row["result"])
         if row["error"]:
@@ -283,6 +294,34 @@ class VideoService:
         with self.connect() as db:
             db.execute("UPDATE video_jobs SET " + ",".join(k+"=?" for k in values) + " WHERE id=?", (*values.values(), job_id))
 
+    def record_diagnostic(self, job_id, phase, response=None, error_type="", secret=""):
+        # Allowlisted structural summary only: never persist raw bodies, prompts,
+        # exception strings, URLs, base64 or arbitrary provider error messages.
+        def token(value):
+            if not isinstance(value, str) or (secret and secret in value):
+                return ""
+            return value if re.fullmatch(r"[A-Za-z0-9_.:-]{1,100}", value) else ""
+        data = {}
+        if response is not None:
+            try:
+                data = response.json()
+            except (ValueError, TypeError):
+                pass
+        if not isinstance(data, dict):
+            data = {}
+        error = data.get("error") if isinstance(data.get("error"), dict) else {}
+        diagnostic = token(response.headers.get("X-Upstream-Ops-Request-Id")) if response is not None else ""
+        diagnostic = diagnostic or token(data.get("upstream_ops_request_id"))
+        entry = {"time": time.time(), "phase": phase, "http_status": response.status_code if response is not None else None,
+                 "error_type": token(error_type) or token(error.get("type")), "error_code": token(error.get("code")),
+                 "diagnostic_id": diagnostic, "upstream_id": token(error.get("request_id")) or token(data.get("request_id")),
+                 "summary": "status=" + token(data.get("status")) + "; id=" + ("present" if data.get("id") or data.get("request_id") else "absent")}
+        with self.connect() as db:
+            row = db.execute("SELECT diagnostics FROM video_jobs WHERE id=?", (job_id,)).fetchone()
+            entries = (json.loads(row["diagnostics"]) + [entry])[-8:]
+            db.execute("UPDATE video_jobs SET diagnostics=?, diagnostic_id=CASE WHEN ?!='' THEN ? ELSE diagnostic_id END WHERE id=?",
+                       (json.dumps(entries), diagnostic, diagnostic, job_id))
+
     def reconcile(self, job_id, body):
         if bool(body.remote_id) == body.confirmed_failed:
             raise HTTPException(400, "请提供上游任务 ID，或确认上游未生成（二选一）")
@@ -291,7 +330,12 @@ class VideoService:
             if not row:
                 raise HTTPException(404, "视频任务不存在")
             if row["state"] != "unknown":
+                previous = db.execute("SELECT * FROM video_reconciliations WHERE job_id=? ORDER BY id DESC LIMIT 1", (job_id,)).fetchone()
+                if previous and previous["remote_id"] == body.remote_id and bool(previous["confirmed_failed"]) == body.confirmed_failed:
+                    return self.get(row["owner"], job_id)
                 raise HTTPException(409, "仅可核对提交结果未知的任务")
+            # Notes are administrator-authored evidence references, not provider bodies.
+            db.execute("INSERT INTO video_reconciliations(job_id,created,remote_id,confirmed_failed,note) VALUES(?,?,?,?,?)", (job_id, time.time(), body.remote_id, body.confirmed_failed, body.note))
             db.execute("UPDATE video_jobs SET state=?, remote_id=?, error=? WHERE id=?",
                        ("pending" if body.remote_id else "failed", body.remote_id, "" if body.remote_id else "管理员确认生成失败，积分将自动退回", job_id))
         return self.get(row["owner"], job_id)
@@ -299,7 +343,7 @@ class VideoService:
     def tick(self, row):
         payload = json.loads(row["payload"])
         protocol = payload.get("protocol", "grok")
-        if row["next_poll"] > time.time():
+        if row["state"] not in {"done", "failed", "expired"} and row["next_poll"] > time.time():
             return
         if row["accounted"]:
             return
@@ -308,7 +352,7 @@ class VideoService:
                 if row["state"] == "done":
                     self.users.settle_quota_reservation(row["reservation"], row["amount"], metadata={"video_job_id": row["id"]})
                 else:
-                    self.users.refund_quota_reservation(row["reservation"], reason="video_failed")
+                    self.users.refund_quota_reservation(row["reservation"], reason="video_failed", metadata={"video_job_id": row["id"], "diagnostic_id": row["diagnostic_id"]})
             user = self.users.get_user(row["owner"])
             if user:
                 self.log_usage(
@@ -339,15 +383,14 @@ class VideoService:
         creating = row["state"] == "queued"
         if creating:
             self.update(row["id"], state="submitting")
+        response = None
         try:
             with requests.Session() as session:
                 if creating:
                     response = session.post(endpoint(channel, protocol=protocol), json=payload.get("upstream_payload", payload), headers=headers, timeout=(10, 45), allow_redirects=False)
                 else:
                     response = session.get(endpoint(channel, "/" + quote(row["remote_id"], safe=""), protocol), headers=headers, timeout=(10, 30), allow_redirects=False)
-                diagnostic = response.headers.get("X-Upstream-Ops-Request-Id")
-                if protocol == "native" and isinstance(diagnostic, str):
-                    self.update(row["id"], diagnostic_id=diagnostic[:200])
+                self.record_diagnostic(row["id"], "create" if creating else "poll", response, secret=str(channel["api_key"]))
                 if response.status_code >= 400:
                     if protocol == "native" and not creating and response.status_code in {401, 403, 404, 410}:
                         self.update(row["id"], state="unknown", error=f"原任务查询需要管理员核对（HTTP {response.status_code}），不会重新生成")
@@ -356,14 +399,21 @@ class VideoService:
                         self.update(row["id"], state="failed", error=f"上游拒绝请求（HTTP {response.status_code}）")
                         return
                     raise ValueError("upstream unavailable")
-                response.raise_for_status()
+                if not 200 <= response.status_code < 300:
+                    raise ValueError("unexpected_http_status")
                 data = response.json()
-                if protocol == "native" and not creating:
+                if not creating:
                     delay = data.get("poll_after_ms", data.get("poll_interval_ms", 10000))
                     delay = delay if isinstance(delay, (int, float)) else 10000
                     self.update(row["id"], next_poll=time.time() + max(5, min(300, delay / 1000)))
                 if creating:
                     remote_id = data.get("id") if protocol == "native" else data.get("request_id") or data.get("id")
+                    # Grok adapters sometimes envelope the same task identifier.
+                    # Never interpret an error/diagnostic request_id as a task ID.
+                    if protocol == "grok" and not remote_id and isinstance(data.get("data"), dict):
+                        remote_id = data["data"].get("request_id") or data["data"].get("id")
+                    if data.get("error"):
+                        raise ValueError("error_response_without_task")
                     if not isinstance(remote_id, str) or not remote_id or len(remote_id) > 512:
                         raise ValueError("missing request id")
                     self.update(row["id"], state="pending", remote_id=remote_id, error="")
@@ -382,9 +432,10 @@ class VideoService:
                         self.update(row["id"], error="上游状态暂不明确，保留原任务等待核对", next_poll=time.time() + 300)
                     else:
                         self.update(row["id"], error="")
-        except (requests.RequestException, ValueError, TypeError, AttributeError):
+        except (requests.RequestException, ValueError, TypeError, AttributeError) as exc:
+            self.record_diagnostic(row["id"], "create" if creating else "poll", response, type(exc).__name__, str(channel["api_key"]))
             self.update(row["id"], **({"state": "unknown", "error": "提交结果未知，请联系管理员核对；不会自动重试"} if creating else {"error": "暂时无法查询上游，后台将继续查询"}))
-            if protocol == "native" and not creating:
+            if not creating:
                 self.update(row["id"], next_poll=time.time() + 60)
         finally:
             if creating and "upstream_payload" in payload:
@@ -402,6 +453,8 @@ class VideoService:
             with requests.Session() as session:
                 with session.get(endpoint(channel, "/" + quote(row["remote_id"], safe="") + "/content", "native"), headers=headers, stream=True, timeout=(10, 60), allow_redirects=False) as response:
                     if response.status_code != 200:
+                        # Do not parse potentially large binary download responses.
+                        self.record_diagnostic(row["id"], "download", error_type="HTTP_" + str(response.status_code))
                         if response.status_code in {401, 403, 404, 410}:
                             self.update(row["id"], state="unknown", error=f"原视频下载需要管理员核对（HTTP {response.status_code}），不会重新生成")
                             return
@@ -418,7 +471,8 @@ class VideoService:
                 raise ValueError("not a video")
             partial.replace(target)
             self.update(row["id"], state="done", result=json.dumps({"url": "/v1/video-jobs/" + row["id"] + "/content", "local": True}), error="")
-        except (requests.RequestException, ValueError, OSError, subprocess.SubprocessError):
+        except (requests.RequestException, ValueError, OSError, subprocess.SubprocessError) as exc:
+            self.record_diagnostic(row["id"], "download", error_type=type(exc).__name__)
             self.update(row["id"], error="视频已生成，文件暂未保存，后台将重试下载；请勿重复生成")
         finally:
             partial.unlink(missing_ok=True)

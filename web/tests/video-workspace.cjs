@@ -95,6 +95,11 @@ audio.write('RIFF');audio.writeUInt32LE(audio.length-8,4);audio.write('WAVEfmt '
       check(submissions.length===1&&submissions[0].mode==='text'&&submissions[0].reference_images.length===0,'text generation payload');
       check(Boolean(submissions[0].client_request_id),'submit has stable request ID');
       await workspace.screenshot({path:`${out}/pending-${variant}-${width}.png`});
+      jobs=[{...jobs[0],status:'unknown',error:'提交结果未知，请联系管理员核对；不会自动重试',diagnostics:[{time:1794951672,phase:'create',http_status:502,error_type:'upstream_error',error_code:'',diagnostic_id:'gateway-test',upstream_id:'upstream-test',summary:'status=; id=absent'}]}];
+      await open();
+      await workspace.getByText('任务诊断（已脱敏）',{exact:true}).click();
+      check((await workspace.textContent()).includes('HTTP 502')&&(await workspace.textContent()).includes('gateway-test'),'unknown job exposes bounded diagnostics');
+      check(submissions.length===1,'unknown job reload never resubmits');
       jobs=[{...jobs[0],status:'done',accounted:true,video:{url:'https://cdn.example/video.mp4'}}];
       await open();await workspace.locator('video').waitFor();
       check(await workspace.locator('video').getAttribute('src')==='https://cdn.example/video.mp4','history restores completed video after reload');
