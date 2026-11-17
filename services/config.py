@@ -229,6 +229,11 @@ def validate_image_models(items: object, default: object) -> tuple[list[dict], s
             raise ImageModelsConfigError("前端模型配置无效：请检查模型 ID、重复项、名称和启用状态")
         seen.add(model_id.lower())
         normalized.append({"id": model_id, "label": label, "enabled": enabled})
+        for key in ("generate_price", "edit_price"):
+            if key in item and item[key] is not None:
+                if isinstance(item[key], bool) or not isinstance(item[key], int) or not 1 <= item[key] <= 10000:
+                    raise ImageModelsConfigError("模型积分必须为1–10000的整数")
+                normalized[-1][key] = item[key]
     available = [item["id"] for item in normalized if item["enabled"]]
     selected = str(default or "").strip()
     if not selected:
@@ -493,7 +498,7 @@ class ConfigStore:
         return default
 
     def get_public_image_models(self) -> list[dict[str, str]]:
-        return [{"id": item["id"], "label": item["label"]} for item in self.get_image_models() if item["enabled"]]
+        return [{"id": item["id"], "label": item["label"], "generate_price": item.get("generate_price", self.data.get("image_generate_price", 1)), "edit_price": item.get("edit_price", self.data.get("image_edit_price", 1))} for item in self.get_image_models() if item["enabled"]]
 
     def get_site_title(self) -> str:
         return str(self.get().get("site_title") or DEFAULT_SITE_TITLE).strip() or DEFAULT_SITE_TITLE

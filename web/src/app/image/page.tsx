@@ -1169,7 +1169,7 @@ function ImageWorkspace() {
       size={imageSize}
       outputFormat={imageOutputFormat}
       availableQuota={availableQuota}
-      unitPrice={referenceImages.length ? imagePrices.edit : imagePrices.generate}
+      unitPrice={referenceImages.length ? (availableModels.find(m => m.id === imageModel)?.edit_price ?? imagePrices.edit) : (availableModels.find(m => m.id === imageModel)?.generate_price ?? imagePrices.generate)}
       hasAnyGenerating={hasAnyGenerating}
       generatingCount={generatingIds.size}
       referenceImages={referenceImages}

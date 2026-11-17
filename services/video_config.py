@@ -17,6 +17,9 @@ class VideoModel(BaseModel):
     supports_video_reference: bool = False
     supports_edit: bool = False
     supports_extend: bool = False
+    price_480p: int | None = Field(default=None, ge=1, le=10000, strict=True)
+    price_720p: int | None = Field(default=None, ge=1, le=10000, strict=True)
+    price_1080p: int | None = Field(default=None, ge=1, le=10000, strict=True)
     min_duration: int = Field(default=1, ge=1, le=15)
     max_duration: int = Field(default=15, ge=1, le=15)
     reference_max_duration: int = Field(default=10, ge=1, le=15)

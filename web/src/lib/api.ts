@@ -3,12 +3,13 @@ import { httpRequest } from "@/lib/request";
 export type AccountType = "Free" | "Plus" | "Pro" | "Team" | "Enterprise";
 export type AccountStatus = "正常" | "限流" | "异常" | "禁用";
 export type ImageModel = string;
-export type ImageModelConfig = { id: string; label: string; enabled?: boolean };
+export type ImageModelConfig = { id: string; label: string; enabled?: boolean; generate_price?: number; edit_price?: number };
 export type PersonalPrompt = { id: string; label: string; content: string; created_at: number; updated_at: number };
 export const fetchPersonalPrompts = () => httpRequest<{ items: PersonalPrompt[]; limit: number }>("/v1/user/prompt-presets", { authScope: "user" });
 export const savePersonalPrompt = (body: { label: string; content: string }, id?: string) => httpRequest<PersonalPrompt>(`/v1/user/prompt-presets${id ? '/' + encodeURIComponent(id) : ''}`, { method: id ? "PUT" : "POST", body, authScope: "user" });
 export const deletePersonalPrompt = (id: string) => httpRequest<{ ok: boolean }>(`/v1/user/prompt-presets/${encodeURIComponent(id)}`, { method: "DELETE", authScope: "user" });
 export type VideoModelConfig = {
+  price_480p?: number | null; price_720p?: number | null; price_1080p?: number | null;
   id: string; label: string; enabled: boolean; protocol: "grok" | "seedance" | "native";
   supports_video_reference?: boolean; supports_edit?: boolean; supports_extend?: boolean;
   max_reference_images: number; supports_voice: boolean; supports_audio_upload: boolean;

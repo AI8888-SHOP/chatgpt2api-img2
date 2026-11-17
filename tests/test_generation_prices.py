@@ -8,6 +8,25 @@ from services.user_service import UserService
 
 
 class GenerationPricesTests(unittest.TestCase):
+    def test_independent_model_prices_and_public_catalog(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = ConfigStore(root / "config.json")
+            users = UserService(root / "users.db")
+            user = users.create_user("models@example.test", "password123", quota=100)
+            config.update({**config.get(), "image_generate_price": 4, "image_edit_price": 4,
+                "image_models": [{"id": "a", "generate_price": 3, "edit_price": 7}, {"id": "b", "generate_price": 9}, {"id": "c"}], "default_image_model": "a"})
+            public = config.get_public_image_models()
+            self.assertEqual([m["generate_price"] for m in public], [3, 9, 4])
+            self.assertEqual([m["edit_price"] for m in public], [7, 4, 4])
+            with patch.object(api, "config", config), patch.object(api, "user_service", users):
+                for model, action, price in [("a", "image_generate", 3), ("a", "image_edit", 7), ("b", "image_generate", 9), ("c", "image_generate", 4)]:
+                    reservation = api.reserve_user_quota(user, 2, action=action, model=model)
+                    self.assertEqual(reservation["amount"], price * 2)
+                    api.refund_user_quota_reservation(reservation, action=action, model=model)
+            with self.assertRaises(ValueError):
+                config.update({**config.get(), "image_models": [{"id": "a", "generate_price": 0}]})
+
     def test_image_price_snapshot_partial_result_and_refund(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -67,7 +67,9 @@ export function VideoWorkspace() {
   const referenceMode = mode === "reference";
   const maxDuration = model ? (referenceMode ? model.reference_max_duration : model.max_duration) : 15;
   const maxImages = mode === "image" ? 1 : model?.max_reference_images || 0;
-  const price = duration * (resolution === "1080p" ? (config?.video_1080p_credits_per_second ?? (config?.video_credits_per_second || 1) * 4) : resolution === "720p" ? (config?.video_720p_credits_per_second ?? (config?.video_credits_per_second || 1) * 2) : (config?.video_credits_per_second || 1));
+  const defaultPrice = (resolution === "1080p" ? (config?.video_1080p_credits_per_second ?? (config?.video_credits_per_second || 1) * 4) : resolution === "720p" ? (config?.video_720p_credits_per_second ?? (config?.video_credits_per_second || 1) * 2) : (config?.video_credits_per_second || 1));
+  const unitPrice = model?.[`price_${resolution}` as "price_480p" | "price_720p" | "price_1080p"] ?? defaultPrice;
+  const price = duration * unitPrice;
   const active = jobs.find(j => !terminal(j));
   const selected = jobs.find(j => j.request_id === selectedId) || jobs[0];
 
@@ -184,7 +186,7 @@ export function VideoWorkspace() {
       {configError && <p role="alert" className="mb-4 text-sm text-amber-700">{configError}<Button variant="ghost" onClick={() => void loadConfig()}>重试加载模型</Button></p>}
       {config && !models.length && <p role="status" className="mb-4 rounded-lg border p-3 text-sm">{config.video_enabled ? "暂无可用视频模型，请联系管理员配置视频渠道" : "视频生成尚未开放"}</p>}
       <fieldset disabled={busy || !model || Boolean(configError)} className="space-y-4 disabled:opacity-60">
-        <label className="block space-y-2 text-sm">视频模型<select aria-label="视频模型" className={selectClass} value={modelId} onChange={e => { changed(); clearReferences(); setMode("text"); setModelId(e.target.value); }}><option value="" disabled>选择视频模型</option>{models.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}</select></label>
+        <label className="block space-y-2 text-sm">视频模型<select aria-label="视频模型" className={selectClass} value={modelId} onChange={e => { changed(); clearReferences(); setMode("text"); setModelId(e.target.value); }}><option value="" disabled>选择视频模型</option>{models.map(m => <option key={m.id} value={m.id}>{m.label} · {m.resolutions.map(r => `${r} ${m[`price_${r}`] ?? (r === "1080p" ? config?.video_1080p_credits_per_second ?? (config?.video_credits_per_second ?? 1) * 4 : r === "720p" ? config?.video_720p_credits_per_second ?? (config?.video_credits_per_second ?? 1) * 2 : config?.video_credits_per_second ?? 1)}积分/秒`).join(" / ")}</option>)}</select></label>
         <PersonalPrompts prompt={prompt} onApply={content => { const next = (prompt.trimEnd() ? prompt.trimEnd() + "\n" : "") + content; if (next.length > 8000) { toast.error("合并后的提示词超过 8000 字，请先精简内容"); return; } changed(); setPrompt(next); }} />
         <div className="flex flex-wrap gap-2" role="group" aria-label="视频生成方式">
           {([['text','文生视频'],['image','图生视频'],['reference','参考素材']] as const).map(([value, label]) => <Button key={value} size="sm" variant={mode === value ? "default" : "outline"} aria-pressed={mode === value} disabled={value !== "text" && !model?.max_reference_images && !(value === "reference" && (model?.supports_voice || model?.supports_video_reference || model?.supports_audio_upload))} onClick={() => changeMode(value)}>{label}</Button>)}
@@ -206,7 +208,7 @@ export function VideoWorkspace() {
           <label className="space-y-2 text-sm">画面比例<select aria-label="视频比例" className={selectClass} disabled={editing || (mode === "image" && model?.protocol === "grok")} value={ratio} onChange={e => { changed(); setRatio(e.target.value); }}>{ratios.map(r => <option key={r}>{r}</option>)}</select></label>
           <label className="flex items-center gap-2 self-end py-3 text-sm"><input type="checkbox" checked={generateAudio} disabled={Boolean(audio || voice.trim())} onChange={e => { changed(); setGenerateAudio(e.target.checked); }} />生成声音</label>
         </div>
-        <div className="rounded-lg bg-muted/30 p-3 text-sm"><div className="flex justify-between"><span>预计积分</span><strong>{price}</strong></div><p className="mt-1 text-xs text-muted-foreground">提交前预扣，明确失败自动退回。按所选清晰度及申请时长计费。</p></div>
+        <div className="rounded-lg bg-muted/30 p-3 text-sm"><div className="flex justify-between"><span>预计积分（{unitPrice} 积分/秒 × {duration} 秒）</span><strong>{price}</strong></div><p className="mt-1 text-xs text-muted-foreground">提交前预扣，明确失败自动退回。按所选清晰度及申请时长计费。</p></div>
         {submitError && <p role="alert" className="text-sm text-red-600 dark:text-red-400">{submitError}；重试相同提交会复用任务，不会重复创建。</p>}
         {active && <p role="status" className="text-sm text-muted-foreground">{active.status === "unknown" ? "已有待核对任务，请联系管理员" : "已有视频正在生成，完成后可继续提交"}</p>}
         <Button className="w-full" disabled={busy || Boolean(active) || !prompt.trim() || !historyLoaded || Boolean(historyError) || (quota !== null && quota < price)} onClick={() => void submit()}>{busy ? <><LoaderCircle size={16} className="animate-spin" />{stage}</> : quota !== null && quota < price ? "积分不足" : <><Film size={16} />{submitError ? "重试提交" : "生成视频"}</>}</Button>

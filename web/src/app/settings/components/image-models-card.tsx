@@ -31,6 +31,7 @@ export function ImageModelsCard() {
 
   return <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm" data-testid="image-models-card">
     <CardContent className="space-y-5 p-6">
+      <p className="text-sm text-muted-foreground">下方默认价仅用于未填写独立价格的模型。每个模型可分别设置文生图、图生图积分；留空沿用默认价。</p>
       <fieldset disabled={!config || isLoadingConfig || isSavingConfig} className="flex flex-wrap gap-4">
         <label className="space-y-1 text-sm">文生图每张积分<Input aria-label="文生图每张积分" type="number" min={1} max={10000} value={config?.image_generate_price ?? 1} onChange={e => setConfigValue("image_generate_price", Math.max(1, Math.min(10000, Math.trunc(Number(e.target.value) || 1))))} /></label>
         <label className="space-y-1 text-sm">图生图每张积分<Input aria-label="图生图每张积分" type="number" min={1} max={10000} value={config?.image_edit_price ?? 1} onChange={e => setConfigValue("image_edit_price", Math.max(1, Math.min(10000, Math.trunc(Number(e.target.value) || 1))))} /></label>
@@ -43,6 +44,7 @@ export function ImageModelsCard() {
         {items.length === 0 && <p className="text-sm text-stone-500">尚无模型，保存后前端将暂停生成。</p>}
         <div className="space-y-3">
           {items.map((item, index) => <div key={index} className="space-y-3 rounded-xl border border-stone-200 p-4" data-testid="image-model-row">
+            <div className="grid gap-3 sm:grid-cols-2">{([['generate_price','文生图',config?.image_generate_price ?? 1],['edit_price','图生图',config?.image_edit_price ?? 1]] as const).map(([key,label,fallback]) => <label key={key} className="text-sm">{label}积分/张<Input aria-label={`${label}模型单价 ${index + 1}`} type="number" min={1} max={10000} value={item[key] ?? ""} placeholder={`默认 ${fallback}`} onChange={e => edit(index, { [key]: e.target.value === "" ? undefined : Math.max(1, Math.min(10000, Math.trunc(Number(e.target.value) || 1))) })} /></label>)}</div>
             <div className="grid gap-3 sm:grid-cols-2">
               <label className="space-y-1 text-sm">模型 ID
                 <Input aria-label={`模型 ID ${index + 1}`} value={item.id} onChange={event => edit(index, { id: event.target.value })} maxLength={128} placeholder="与生图上游模型一致" />

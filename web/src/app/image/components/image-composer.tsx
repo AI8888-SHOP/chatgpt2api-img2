@@ -310,7 +310,7 @@ function ImageModelSelect({
       <SelectContent>
         {availableOptions.map((option) => (
           <SelectItem key={option.id} value={option.id}>
-            {option.label}
+            {option.label} · 文生 {option.generate_price ?? 1} / 图生 {option.edit_price ?? 1} 积分/张
           </SelectItem>
         ))}
       </SelectContent>

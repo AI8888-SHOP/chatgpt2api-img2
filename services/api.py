@@ -658,6 +658,10 @@ def reserve_user_quota(user, amount: int, *, action: str, model: str, unit_price
     amount = max(1, int(amount or 1))
     price_key = {"image_generate": "image_generate_price", "image_edit": "image_edit_price", "image_resume_poll": "image_generate_price", "chat_image_completion": "image_generate_price", "responses_image_generation": "image_generate_price"}.get(action)
     unit_price = unit_price if unit_price is not None else (int(config.get().get(price_key, 1)) if price_key else 1)
+    if price_key and action != "image_resume_poll":
+        selected_model = config.get_default_image_model() if model == "auto" else model
+        entry = next((item for item in config.get_image_models() if item["id"].lower() == selected_model.lower()), {})
+        unit_price = int(entry.get("edit_price" if action == "image_edit" else "generate_price", unit_price))
     amount *= unit_price
     reservation = user_service.reserve_quota(
         user.id,

@@ -231,6 +231,7 @@ class VideoService:
             price = int(self.config.get().get("video_720p_credits_per_second", price * 2))
         if body.resolution == "1080p":
             price = int(self.config.get().get("video_1080p_credits_per_second", price * 4))
+        price = model.get("price_" + body.resolution) or price
         amount = body.duration * price
         with self.lock, self.connect() as db:
             if body.client_request_id:

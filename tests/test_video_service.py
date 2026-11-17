@@ -50,6 +50,16 @@ class VideoTests(unittest.TestCase):
     def create(self):
         return self.service.create(self.user, self.body)["request_id"]
 
+    def test_video_model_price_overrides_global(self):
+        self.config.update({**self.config.get(), "video_credits_per_second": 1, "video_models": [{"id": "grok-imagine-video", "price_480p": 7}]})
+        job_id = self.create()
+        self.assertEqual(self.row(job_id)["amount"], 35)
+        self.config.update({**self.config.get(), "video_models": [{"id": "grok-imagine-video", "price_480p": 9}]})
+        self.tick(job_id, {"request_id": "remote"})
+        self.tick(job_id, {"status": "done", "video": {"url": "https://cdn.example/video.mp4"}})
+        self.tick(job_id)
+        self.assertEqual(self.users.get_user(self.user.id).quota, 65)
+
     def test_native_capability_gates_and_edit_payload(self):
         from services.video_config import VideoModel
         model = VideoModel(id="grok-imagine-video", protocol="native", supports_edit=True, supports_extend=True, supports_video_reference=True, resolutions=["1080p"]).model_dump()

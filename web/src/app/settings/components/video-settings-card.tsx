@@ -20,6 +20,7 @@ export function VideoSettingsCard() {
   const editChannel = (i: number, update: Partial<VideoChannelConfig>) => setConfigValue("video_upstreams", channels.map((m, index) => index === i ? { ...m, ...update } : m));
   return <Card data-testid="video-settings-card" className="rounded-2xl">
     <CardContent className="space-y-6 p-6">
+      <p className="text-sm text-muted-foreground">每个模型可按清晰度填写独立的每秒积分。留空沿用下方默认价格，修改默认价不影响已设置独立价格的模型。</p>
       <div><h2 className="text-lg font-semibold">视频生成</h2><p className="text-sm text-muted-foreground">独立配置视频模型和渠道。首页只展示已启用且有可用渠道的模型。</p></div>
       <fieldset disabled={!config || isLoadingConfig || isSavingConfig} className="space-y-6 disabled:opacity-60">
         <div className="flex flex-wrap items-center gap-5">
@@ -35,6 +36,7 @@ export function VideoSettingsCard() {
         </label>
         <div className="space-y-3"><h3 className="font-medium">前端视频模型</h3>
           {models.map((model, index) => <div key={index} className="space-y-3 rounded-xl border p-4" data-testid="video-model-row">
+            <div className="grid gap-3 sm:grid-cols-3">{model.resolutions.map(res => { const key = `price_${res}` as const; const fallback = res === "1080p" ? config?.video_1080p_credits_per_second ?? (config?.video_credits_per_second ?? 1) * 4 : res === "720p" ? config?.video_720p_credits_per_second ?? (config?.video_credits_per_second ?? 1) * 2 : config?.video_credits_per_second ?? 1; return <label key={res} className="text-sm">{res} 积分/秒<Input aria-label={`${res}模型单价 ${index + 1}`} type="number" min={1} max={10000} value={model[key] ?? ""} placeholder={`默认 ${fallback}`} onChange={e => editModel(index, { [key]: e.target.value === "" ? null : Math.max(1, Math.min(10000, Math.trunc(Number(e.target.value) || 1))) })} /></label>; })}</div>
             <div className="grid gap-3 sm:grid-cols-3">
               <label className="space-y-1 text-sm">模型 ID<Input aria-label={`视频模型 ID ${index + 1}`} value={model.id} maxLength={100} onChange={e => editModel(index, { id: e.target.value })} /></label>
               <label className="space-y-1 text-sm">显示名称<Input aria-label={`视频模型名称 ${index + 1}`} value={model.label} onChange={e => editModel(index, { label: e.target.value })} /></label>

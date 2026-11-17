@@ -52,7 +52,7 @@ class AdminModelsTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         public = self.client.get("/app-config")
         self.assertEqual(public.json()["image_models"], [
-            {"id": "custom-image", "label": "自定义图像"}, {"id": "gpt-image-2", "label": "GPT"}])
+            {"id": "custom-image", "label": "自定义图像", "generate_price": 1, "edit_price": 1}, {"id": "gpt-image-2", "label": "GPT", "generate_price": 1, "edit_price": 1}])
         self.assertEqual(public.json()["default_image_model"], "gpt-image-2")
         for secret in ("private-test-key", "example.test", "disabled-image", "api_key"):
             self.assertNotIn(secret, public.text)
