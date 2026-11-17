@@ -131,6 +131,12 @@ audio.write('RIFF');audio.writeUInt32LE(audio.length-8,4);audio.write('WAVEfmt '
       publicFailure=false;
       await page.goto(base+'/admin/settings/');
       const card=page.getByTestId('video-settings-card');
+      await page.getByLabel('480p模型单价 1',{exact:true}).fill('17');
+      await page.getByLabel('视频模型协议 1',{exact:true}).selectOption('native');
+      await page.getByLabel('视频模型协议 1',{exact:true}).selectOption('grok');
+      check(await page.getByLabel('480p模型单价 1',{exact:true}).inputValue()==='17','protocol change preserves model price');
+      check(await card.getByTestId('video-model-row').first().getByText('1080p',{exact:true}).isVisible(),'Grok exposes configurable 1080p');
+      await page.getByLabel('Grok 网关路径 1',{exact:true}).selectOption('videos');
       await card.getByRole('button',{name:'添加视频渠道',exact:true}).click();
       await page.getByLabel('视频渠道名称 2',{exact:true}).fill('新视频渠道');
       await page.getByLabel('视频渠道地址 2',{exact:true}).fill('https://new-provider.example/v1');
@@ -143,6 +149,7 @@ audio.write('RIFF');audio.writeUInt32LE(audio.length-8,4);audio.write('WAVEfmt '
       await page.getByText('配置已保存',{exact:true}).waitFor();
       check(settings.video_upstreams.length===2&&settings.video_credits_per_second===3&&settings.video_models.length===2,'admin saves independent video channels, models and price');
       check(settings.image_upstreams[0].name==='example','video settings preserve image channels');
+      check(settings.video_models[0].grok_endpoint==='videos','admin saves explicit Grok gateway alias');
       await card.screenshot({path:`${out}/settings-${variant}-${width}.png`});
       check(errors.length===0,errors.join('\n'));
       await context.close();

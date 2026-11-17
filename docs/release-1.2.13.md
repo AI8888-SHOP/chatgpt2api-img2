@@ -1,8 +1,9 @@
-# v1.2.12
+# v1.2.13
 
 Video submission diagnostics and protocol configuration fix.
 
 - Grok uses `/v1/videos/generations`, `duration`, `image.url`, `request_id` (or compatible `id` / `data.request_id` / `data.id`), and `done` with `video.url`. Native uses `/v1/videos`, `seconds`, `input_reference`, `id`, and `completed` followed by authenticated `/content`. These are separate contracts, not interchangeable endpoint aliases.
+- A Grok model can explicitly use the `/v1/videos` gateway alias without changing its payload or result contract. The path choice is persisted with the task so later catalog edits do not reroute existing work. v1.2.12 was a build checkpoint; deploy v1.2.13 with this gateway alias support.
 - Allow administrators to enable 1080p independently of protocol. Changing protocol preserves configured resolution prices. Actual provider/model capability still needs confirmation.
 - Prefer configured public reference image URLs for Grok; retain data-URI compatibility when no public asset base is configured.
 - Persist the last eight structural diagnostics per job: phase, time, HTTP status, error type/code, gateway and upstream IDs. Do not store raw response messages, URLs, credentials, prompts or base64 in diagnostics. Owners can inspect diagnostics in the video workspace.

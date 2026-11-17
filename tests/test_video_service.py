@@ -272,6 +272,19 @@ class VideoTests(unittest.TestCase):
             session.assert_not_called()
         self.assertEqual(self.row(job_id)["state"], "pending")
 
+    def test_grok_gateway_alias_retains_protocol_and_path_snapshot(self):
+        self.config.update({**self.config.get(), "video_models": [{"id": "grok-imagine-video", "protocol": "grok", "grok_endpoint": "videos"}]})
+        job_id = self.create()
+        session = self.tick(job_id, {"request_id": "grok-alias-task"})
+        self.assertTrue(session.post.call_args.args[0].endswith("/v1/videos"))
+        self.assertIn("duration", session.post.call_args.kwargs["json"])
+        self.assertNotIn("seconds", session.post.call_args.kwargs["json"])
+        self.config.update({**self.config.get(), "video_models": [{"id": "grok-imagine-video", "protocol": "native"}]})
+        session = self.tick(job_id, {"status": "done", "video": {"url": "https://cdn.test/result.mp4"}})
+        self.assertTrue(session.get.call_args.args[0].endswith("/v1/videos/grok-alias-task"))
+        self.assertEqual(self.row(job_id)["state"], "done")
+        session.post.assert_not_called()
+
     def test_grok_prefers_public_asset_url_when_configured(self):
         content = io.BytesIO()
         Image.new("RGB", (4, 4)).save(content, format="PNG")

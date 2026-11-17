@@ -11,6 +11,7 @@ export const deletePersonalPrompt = (id: string) => httpRequest<{ ok: boolean }>
 export type VideoModelConfig = {
   price_480p?: number | null; price_720p?: number | null; price_1080p?: number | null;
   id: string; label: string; enabled: boolean; protocol: "grok" | "seedance" | "native";
+  grok_endpoint?: "generations" | "videos";
   supports_video_reference?: boolean; supports_edit?: boolean; supports_extend?: boolean;
   max_reference_images: number; supports_voice: boolean; supports_audio_upload: boolean;
   min_duration: number; max_duration: number; reference_max_duration: number;

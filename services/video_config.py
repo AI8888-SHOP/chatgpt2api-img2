@@ -11,6 +11,7 @@ class VideoModel(BaseModel):
     label: str = Field(default="", max_length=80)
     enabled: bool = True
     protocol: Literal["grok", "seedance", "native"] = "grok"
+    grok_endpoint: Literal["generations", "videos"] = "generations"
     max_reference_images: int = Field(default=7, ge=0, le=14)
     supports_voice: bool = False
     supports_audio_upload: bool = False

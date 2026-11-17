@@ -66,7 +66,7 @@ def channel_key(channel):
     return hashlib.sha256(value.encode()).hexdigest()
 
 
-def endpoint(channel, suffix="", protocol="grok"):
+def endpoint(channel, suffix="", protocol="grok", grok_endpoint="generations"):
     base = str(channel["base_url"]).rstrip("/")
     if protocol == "seedance":
         if not base.endswith(("/api/v3", "/v3", "/v1")):
@@ -74,7 +74,7 @@ def endpoint(channel, suffix="", protocol="grok"):
         return base + "/contents/generations/tasks" + suffix
     if not base.endswith("/v1"):
         base += "/v1"
-    return base + ("/videos" if protocol == "native" else "/videos/generations") + suffix
+    return base + ("/videos" if protocol == "native" or (protocol == "grok" and grok_endpoint == "videos") else "/videos/generations") + suffix
 
 
 class VideoService:
@@ -256,7 +256,7 @@ class VideoService:
             job_id = "vid_" + uuid.uuid4().hex
             channel = channels[int(time.time_ns()) % len(channels)]
             # Persist before reserving so crash recovery can identify incomplete setup.
-            stored = {**body.model_dump(), "protocol": model["protocol"], "upstream_payload": upstream_payload}
+            stored = {**body.model_dump(), "protocol": model["protocol"], "grok_endpoint": model.get("grok_endpoint", "generations"), "upstream_payload": upstream_payload}
             db.execute("INSERT INTO video_jobs(id,owner,created,state,payload,channel,upstream_name,amount,client_request_id) VALUES(?,?,?,'preparing',?,?,?,?,?)",
                        (job_id, user.id, time.time(), json.dumps(stored), channel_key(channel), str(channel.get("name") or "sub2api"), amount, body.client_request_id))
             db.commit()
@@ -387,9 +387,9 @@ class VideoService:
         try:
             with requests.Session() as session:
                 if creating:
-                    response = session.post(endpoint(channel, protocol=protocol), json=payload.get("upstream_payload", payload), headers=headers, timeout=(10, 45), allow_redirects=False)
+                    response = session.post(endpoint(channel, protocol=protocol, grok_endpoint=payload.get("grok_endpoint", "generations")), json=payload.get("upstream_payload", payload), headers=headers, timeout=(10, 45), allow_redirects=False)
                 else:
-                    response = session.get(endpoint(channel, "/" + quote(row["remote_id"], safe=""), protocol), headers=headers, timeout=(10, 30), allow_redirects=False)
+                    response = session.get(endpoint(channel, "/" + quote(row["remote_id"], safe=""), protocol, payload.get("grok_endpoint", "generations")), headers=headers, timeout=(10, 30), allow_redirects=False)
                 self.record_diagnostic(row["id"], "create" if creating else "poll", response, secret=str(channel["api_key"]))
                 if response.status_code >= 400:
                     if protocol == "native" and not creating and response.status_code in {401, 403, 404, 410}:
