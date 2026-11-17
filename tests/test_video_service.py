@@ -123,6 +123,74 @@ class VideoTests(unittest.TestCase):
         self.assertEqual(self.row(job_id)["state"], "downloading")
         self.assertEqual(self.row(job_id)["remote_id"], "native-task")
 
+    def test_grok_relative_content_recovery_and_once_only_settlement(self):
+        self.config.update({**self.config.get(), "video_models": [{"id": "grok-imagine-video", "protocol": "grok", "grok_endpoint": "videos"}]})
+        job_id = self.create()
+        self.tick(job_id, {"request_id": "grok-task"})
+        self.tick(job_id, {"status": "done", "video": {"url": "/v1/videos/grok-task/content"}}).post.assert_not_called()
+        self.assertEqual(self.row(job_id)["state"], "downloading")
+        # A timeout keeps the paid task intact; restart uses its original snapshot.
+        self.tick(job_id, error=requests.Timeout()).post.assert_not_called()
+        self.assertEqual(self.row(job_id)["state"], "downloading")
+        self.config.update({**self.config.get(), "video_models": [{"id": "grok-imagine-video", "protocol": "native"}]})
+        self.service = VideoService(self.config, self.users, self.service.path, self.log)
+        with patch("services.video_service.Thread"):
+            self.service.start()
+        self.service.update(job_id, next_poll=0)
+        with patch("services.video_service.requests.Session") as factory, patch("services.video_service.subprocess.run") as probe:
+            session = factory.return_value.__enter__.return_value
+            response = session.get.return_value.__enter__.return_value
+            response.status_code = 200
+            response.iter_content.return_value = [b"synthetic-video"]
+            probe.return_value.stdout = b'{"streams":[{"codec_type":"video"}]}'
+            self.service.tick(self.row(job_id))
+            self.assertEqual(session.get.call_args.args[0], "https://provider.example/v1/videos/grok-task/content")
+            self.assertEqual(session.get.call_args.kwargs["headers"]["Authorization"], "Bearer private-key")
+            self.assertFalse(session.get.call_args.kwargs["allow_redirects"])
+            session.post.assert_not_called()
+        self.assertTrue(self.service.get(self.user.id, job_id)["video"]["local"])
+        self.assertEqual(self.service.content_path(self.user.id, job_id).read_bytes(), b"synthetic-video")
+        with self.assertRaises(HTTPException):
+            self.service.content_path("other-owner", job_id)
+        for _ in range(3):
+            self.tick(job_id)
+        self.assertEqual(self.users.get_user(self.user.id).quota, 95)
+        self.assertTrue(self.row(job_id)["accounted"])
+
+    def test_grok_rejects_untrusted_relative_paths_and_download_redirect(self):
+        self.config.update({**self.config.get(), "video_models": [{"id": "grok-imagine-video", "protocol": "grok", "grok_endpoint": "videos"}]})
+        job_id = self.create()
+        self.tick(job_id, {"request_id": "grok-task"})
+        for url in ("/v1/videos/other-task/content", "//evil.test/content", "/admin", "../content", "/v1/videos/grok-task/content?token=secret", "/v1/videos/grok-task/content#fragment", "/v1/videos/../grok-task/content", "/v1/videos/%67rok-task/content", " /v1/videos/grok-task/content"):
+            with self.subTest(url=url):
+                session = self.tick(job_id, {"status": "done", "video": {"url": url}})
+                self.assertEqual(self.row(job_id)["state"], "pending")
+                self.assertEqual(session.get.call_count, 1)
+                session.post.assert_not_called()
+        self.tick(job_id, {"status": "done", "video": {"url": "/v1/videos/grok-task/content"}})
+        self.service.update(job_id, next_poll=0)
+        with patch("services.video_service.requests.Session") as factory:
+            session = factory.return_value.__enter__.return_value
+            response = session.get.return_value.__enter__.return_value
+            response.status_code = 302
+            response.headers = {"Location": "https://evil.test/steal"}
+            self.service.tick(self.row(job_id))
+            self.assertFalse(session.get.call_args.kwargs["allow_redirects"])
+            self.assertEqual(session.get.call_count, 1)
+            session.post.assert_not_called()
+        self.assertEqual(self.row(job_id)["state"], "downloading")
+        self.assertIsNone(self.row(job_id)["result"])
+
+    def test_grok_external_absolute_result_never_receives_channel_credentials(self):
+        job_id = self.create()
+        self.tick(job_id, {"request_id": "grok-task"})
+        session = self.tick(job_id, {"status": "done", "video": {"url": "https://external.example/video.mp4"}})
+        self.assertEqual(session.get.call_count, 1)
+        self.assertEqual(session.get.call_args.args[0], "https://provider.example/v1/videos/generations/grok-task")
+        result = self.service.get(self.user.id, job_id)
+        self.assertEqual(result["video"], {"url": "https://external.example/video.mp4"})
+        self.assertNotIn("private-key", json.dumps(result))
+
     def test_independent_resolution_price_snapshot(self):
         self.config.update({**self.config.get(), "video_credits_per_second": 3, "video_720p_credits_per_second": 7})
         job = self.service.create(self.user, VideoRequest(prompt="test", duration=5, resolution="720p"))

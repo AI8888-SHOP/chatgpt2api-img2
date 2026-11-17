@@ -77,6 +77,18 @@ def endpoint(channel, suffix="", protocol="grok", grok_endpoint="generations"):
     return base + ("/videos" if protocol == "native" or (protocol == "grok" and grok_endpoint == "videos") else "/videos/generations") + suffix
 
 
+def authenticated_content_endpoint(row, channel):
+    """Construct from pinned task/channel, never from a provider-supplied URL."""
+    payload = json.loads(row["payload"])
+    if not (payload.get("protocol") == "native" or
+            (payload.get("protocol") == "grok" and payload.get("grok_endpoint") == "videos")):
+        raise ValueError("unsupported authenticated content contract")
+    remote_id = row["remote_id"]
+    if not isinstance(remote_id, str) or not re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9_.:-]{0,511}", remote_id):
+        raise ValueError("unsafe content task id")
+    return endpoint(channel, "/" + quote(remote_id, safe="") + "/content", "native")
+
+
 class VideoService:
     def __init__(self, config, users, path: Path, log_usage):
         self.config, self.users, self.log_usage = config, users, log_usage
@@ -378,7 +390,7 @@ class VideoService:
         headers = {"Authorization": "Bearer " + str(channel["api_key"])}
         if row["state"] == "downloading":
             self.update(row["id"], next_poll=time.time() + 60)
-            self.download_native(row, channel, headers)
+            self.download_content(row, channel, headers)
             return
         creating = row["state"] == "queued"
         if creating:
@@ -422,6 +434,14 @@ class VideoService:
                 elif data.get("status") == ("succeeded" if protocol == "seedance" else "done") and protocol != "native":
                     video = data.get("content" if protocol == "seedance" else "video") or {}
                     url = video.get("video_url" if protocol == "seedance" else "url")
+                    if protocol == "grok" and isinstance(url, str) and not urlsplit(url).scheme:
+                        # Exact root-relative path only: reject other tasks, query
+                        # strings, fragments, protocol-relative hosts and traversal.
+                        expected = authenticated_content_endpoint(row, channel)
+                        if url != urlsplit(expected).path:
+                            raise ValueError("untrusted relative content path")
+                        self.update(row["id"], state="downloading", error="", next_poll=0)
+                        return
                     if not isinstance(url, str) or urlsplit(url).scheme not in {"https", "http"}:
                         raise ValueError("invalid video result")
                     self.update(row["id"], state="done", result=json.dumps({"url": url}), error="")
@@ -444,14 +464,15 @@ class VideoService:
                 payload.pop("upstream_payload")
                 self.update(row["id"], payload=json.dumps(payload))
 
-    def download_native(self, row, channel, headers):
+    def download_content(self, row, channel, headers):
         root = self.path.parent / "video_results"
         root.mkdir(parents=True, exist_ok=True)
         target = root / (row["id"] + ".mp4")
         partial = target.with_suffix(".part")
         try:
+            content_url = authenticated_content_endpoint(row, channel)
             with requests.Session() as session:
-                with session.get(endpoint(channel, "/" + quote(row["remote_id"], safe="") + "/content", "native"), headers=headers, stream=True, timeout=(10, 60), allow_redirects=False) as response:
+                with session.get(content_url, headers=headers, stream=True, timeout=(10, 60), allow_redirects=False) as response:
                     if response.status_code != 200:
                         # Do not parse potentially large binary download responses.
                         self.record_diagnostic(row["id"], "download", error_type="HTTP_" + str(response.status_code))
