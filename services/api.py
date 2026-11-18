@@ -83,7 +83,7 @@ class ImageGenerationRequest(BaseModel):
     n: int = Field(default=1, ge=1, le=4)
     quality: str = Field(default="auto", description="auto/low/medium/high")
     size: str = Field(default="auto", description="auto/1024x1024/1024x1536/1536x1024/4096x4096等")
-    output_format: str = Field(default="png", description="png/jpeg/webp")
+    output_format: str = Field(default="png", description="png/jpeg/webp/gif (GIF requires gpt-image-2.6 upstream)")
     output_compression: int = Field(default=0, ge=0, le=100, description="压缩率0-100")
     moderation: str = Field(default="auto", description="auto/low")
     response_format: str = "url"
@@ -908,6 +908,7 @@ def create_app() -> FastAPI:
             auto_register_thread.join(timeout=1)
 
     app = FastAPI(title="chatgpt2api", version=app_version, lifespan=lifespan)
+    app.state.videos = videos
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -1780,7 +1781,7 @@ def create_app() -> FastAPI:
             )
             _update_image_job(job_id, status="error", error=str(exc), can_resume=False, progress="error", progress_text=_image_progress_text("error"))
 
-    def run_edit_job(job_id: str, api_key, prompt: str, images: list[tuple[bytes, str, str]], model: str, n: int) -> None:
+    def run_edit_job(job_id: str, api_key, prompt: str, images: list[tuple[bytes, str, str]], model: str, n: int, size: str = "auto", output_format: str = "png") -> None:
         start_time = datetime.now().timestamp()
         usage_metadata = build_image_cache_metadata(api_key, action="image_edit", model=model)
         job = _get_image_job(job_id) or {}
@@ -1798,6 +1799,8 @@ def create_app() -> FastAPI:
                 n,
                 usage_metadata,
                 progress_callback=lambda step: _update_image_job_progress(job_id, step),
+                size=size,
+                output_format=output_format,
             )
             usage_amount = settle_user_quota_reservation(
                 reservation,
@@ -1976,6 +1979,8 @@ def create_app() -> FastAPI:
             prompt: str = Form(...),
             model: str = Form(default="auto"),
             n: int = Form(default=1),
+            size: str = Form(default="auto"),
+            output_format: str = Form(default="png"),
             client_conversation_id: str = Form(default=""),
             client_image_id: str = Form(default=""),
     ):
@@ -2003,7 +2008,7 @@ def create_app() -> FastAPI:
             client_image_id=client_image_id,
         )
         _update_image_job(job_id, reservation_id=reservation.get("id"), reserved_amount=reservation.get("amount"), unit_price=reservation.get("unit_price", 1))
-        Thread(target=run_edit_job, args=(job_id, api_key, prompt, images, model, n), daemon=True).start()
+        Thread(target=run_edit_job, args=(job_id, api_key, prompt, images, model, n, size, output_format), daemon=True).start()
         return {"job_id": job_id, "status": "pending"}
 
     @router.get("/v1/image-jobs")
@@ -2109,6 +2114,8 @@ def create_app() -> FastAPI:
             prompt: str = Form(...),
             model: str = Form(default="gpt-image-2"),
             n: int = Form(default=1),
+            size: str = Form(default="auto"),
+            output_format: str = Form(default="png"),
     ):
         start_time = datetime.now().timestamp()
         token, api_key = require_user(authorization)
@@ -2141,6 +2148,8 @@ def create_app() -> FastAPI:
                 model,
                 n,
                 usage_metadata,
+                size=size,
+                output_format=output_format,
             )
             usage_amount = settle_user_quota_reservation(
                 reservation,

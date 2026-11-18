@@ -714,6 +714,8 @@ class ChatGPTService:
         progress_callback: Callable[[str], None] | None = None,
     ):
         """Route configured external models upstream and GPT Image through the local account pool."""
+        if output_format == "gif" and not is_upstream_image_model(model):
+            raise ImageGenerationError("账号池协议不支持 GIF 输出")
         if is_upstream_image_model(model):
             if progress_callback:
                 progress_callback("generating_image")
@@ -751,6 +753,8 @@ class ChatGPTService:
         n: int,
         metadata: dict[str, str] | None = None,
         progress_callback: Callable[[str], None] | None = None,
+        size: str = "auto",
+        output_format: str = "png",
     ):
         normalized_images = list(images)
         if not normalized_images:
@@ -758,7 +762,14 @@ class ChatGPTService:
         if is_upstream_image_model(model):
             if progress_callback:
                 progress_callback("generating_image")
-            return edit_image_upstream(prompt, normalized_images, n=n, metadata=metadata, model=model)
+            return edit_image_upstream(prompt, normalized_images, n=n, metadata=metadata, model=model, size=size, output_format=output_format)
+        if output_format == "gif":
+            raise ImageGenerationError("账号池协议不支持 GIF 输出")
+        if size and size != "auto":
+            # Account conversations have no structured image size parameter;
+            # use the same prompt hint contract as account-pool generation.
+            from services.protocol.conversation import build_image_prompt
+            prompt = build_image_prompt(prompt, size, "")
         self._ensure_free_account_pool(n, progress_callback=progress_callback, deadline=None)
         timeout_label = self._overall_image_timeout_secs()
         return self._edit_with_account_pool(

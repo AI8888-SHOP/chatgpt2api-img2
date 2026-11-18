@@ -1,6 +1,7 @@
 "use client";
 
 import { formatUtc8Time } from "@/lib/datetime";
+import { httpRequest } from "@/lib/request";
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { HardDrive, Image as ImageIcon, LoaderCircle, RefreshCw, Search, Trash2 } from "lucide-react";
@@ -23,10 +24,33 @@ function formatAction(action: string) {
     {
       image_generate: "文生图",
       image_edit: "编辑图",
+      video_generate: "视频",
       chat_image_completion: "Chat 兼容",
       responses_image_generation: "Responses 兼容",
     }[action] || action || "未标记"
   );
+}
+
+function CachedVideo({ item }: { item: GeneratedImageCacheItem }) {
+  const [url, setUrl] = useState("");
+  const [loading, setLoading] = useState(false);
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  useEffect(() => () => { if (url) URL.revokeObjectURL(url); }, [url]);
+  const load = async () => {
+    setLoading(true);
+    try {
+      const blob = await httpRequest<Blob>(item.url, { authScope: "admin", responseType: "blob", timeout: 120000 });
+      if (mounted.current) setUrl(URL.createObjectURL(blob));
+    } catch {
+      if (mounted.current) toast.error("视频加载失败，文件可能已清理，请刷新后重试");
+    } finally { if (mounted.current) setLoading(false); }
+  };
+  if (!item.url) return <p className="p-8 text-sm">无本地缓存文件；远程地址不在后台公开。</p>;
+  return <div className="flex h-full flex-col justify-center gap-2 p-3 pt-12">
+    {url ? <><video src={url} controls playsInline className="min-h-0 w-full flex-1" /><a href={url} download={item.file_name} className="text-center underline">下载视频</a></> :
+      <Button onClick={() => void load()} disabled={loading}>{loading ? "正在加载…" : "鉴权加载 / 播放视频"}</Button>}
+  </div>;
 }
 
 function formatDate(value: number) {
@@ -79,7 +103,7 @@ export default function AdminCachePage() {
       setTotalSize(data.total_size_bytes);
       setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.id === id)));
     } catch (error) {
-      const message = error instanceof Error ? error.message : "加载图片缓存失败";
+      const message = error instanceof Error ? error.message : "加载媒体缓存失败";
       toast.error(message);
     } finally {
       if (!silent) {
@@ -125,19 +149,19 @@ export default function AdminCachePage() {
 
   const handleDeleteSelected = async () => {
     if (selectedIds.length === 0) {
-      toast.error("请先选择图片");
+      toast.error("请先选择媒体文件");
       return;
     }
-    const confirmed = window.confirm(`确认删除当前选中的 ${selectedIds.length} 张图片？`);
+    const confirmed = window.confirm(`确认删除当前选中的 ${selectedIds.length} 个媒体成品？删除视频缓存后用户将无法播放或下载，积分结算不变。`);
     if (!confirmed) return;
     setIsDeleting(true);
     try {
       const data = await deleteAdminGeneratedImages(selectedIds);
       await loadItems(true);
       setSelectedIds([]);
-      toast.success(`已删除 ${data.deleted} 张图片`);
+      toast.success(`已删除 ${data.deleted} 个媒体成品`);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "删除图片失败";
+      const message = error instanceof Error ? error.message : "删除媒体失败";
       toast.error(message);
     } finally {
       setIsDeleting(false);
@@ -145,16 +169,16 @@ export default function AdminCachePage() {
   };
 
   const handleDeleteSingle = async (id: string) => {
-    const confirmed = window.confirm("确认删除这张缓存图片？");
+    const confirmed = window.confirm("确认删除此缓存成品？删除视频缓存后用户将无法播放或下载，积分结算不变。");
     if (!confirmed) return;
     setIsDeleting(true);
     try {
       const data = await deleteAdminGeneratedImages([id]);
       await loadItems(true);
       setSelectedIds((prev) => prev.filter((item) => item !== id));
-      toast.success(`已删除 ${data.deleted} 张图片`);
+      toast.success(`已删除 ${data.deleted} 个媒体成品`);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "删除图片失败";
+      const message = error instanceof Error ? error.message : "删除媒体失败";
       toast.error(message);
     } finally {
       setIsDeleting(false);
@@ -170,7 +194,7 @@ export default function AdminCachePage() {
               <ImageIcon className="size-5" />
             </div>
             <div>
-              <div className="text-sm text-stone-500">缓存图片总数</div>
+              <div className="text-sm text-stone-500">图片 / 视频资产总数</div>
               <div className="mt-1 text-3xl font-semibold tracking-tight text-stone-900">{total}</div>
             </div>
           </CardContent>
@@ -207,7 +231,7 @@ export default function AdminCachePage() {
               <Input
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
-                placeholder="搜索提示词、模型、文件名、密钥名"
+                placeholder="搜索模型、任务 ID、文件名、密钥名"
                 className="pl-9"
               />
             </div>
@@ -219,6 +243,7 @@ export default function AdminCachePage() {
                 <SelectItem value="all">全部类型</SelectItem>
                 <SelectItem value="image_generate">文生图</SelectItem>
                 <SelectItem value="image_edit">编辑图</SelectItem>
+                <SelectItem value="video_generate">视频</SelectItem>
                 <SelectItem value="chat_image_completion">Chat 兼容</SelectItem>
                 <SelectItem value="responses_image_generation">Responses 兼容</SelectItem>
               </SelectContent>
@@ -254,7 +279,7 @@ export default function AdminCachePage() {
             <Checkbox checked={allSelected} onCheckedChange={(checked) => handleToggleAll(Boolean(checked))} />
             <span>全选当前页</span>
             <span>
-              第 {safePage} / {pageCount} 页，共 {total} 张
+              第 {safePage} / {pageCount} 页，共 {total} 项
             </span>
           </div>
         </CardContent>
@@ -263,14 +288,14 @@ export default function AdminCachePage() {
       {isLoading ? (
         <div className="flex min-h-[280px] items-center justify-center text-stone-500">
           <LoaderCircle className="mr-2 size-5 animate-spin" />
-          正在加载图片缓存...
+          正在加载媒体缓存...
         </div>
       ) : items.length === 0 ? (
         <Card className="border-dashed border-stone-200 bg-white/80">
           <CardContent className="flex min-h-[260px] flex-col items-center justify-center gap-3 text-center text-stone-500">
             <ImageIcon className="size-8" />
-            <div className="text-lg font-medium text-stone-700">暂无图片缓存</div>
-            <div className="max-w-md text-sm leading-6">这里会显示服务器上保存的生图结果，支持后台集中查看和批量删除。</div>
+            <div className="text-lg font-medium text-stone-700">暂无媒体缓存</div>
+            <div className="max-w-md text-sm leading-6">这里显示图片和视频成品，支持集中查看与清理。本地视频需鉴权加载。</div>
           </CardContent>
         </Card>
       ) : (
@@ -281,7 +306,7 @@ export default function AdminCachePage() {
               return (
                 <Card key={item.id} className="overflow-hidden border-stone-200/80 bg-white shadow-sm">
                   <div className="relative aspect-square bg-stone-100">
-                    <img src={item.url} alt={item.prompt || item.file_name} className="h-full w-full object-cover" />
+                    {item.action === "video_generate" ? <CachedVideo item={item} /> : <img src={item.url} alt={item.prompt || item.file_name} className="h-full w-full object-cover" />}
                     <div className="absolute top-3 left-3">
                       <Checkbox
                         checked={checked}
@@ -301,7 +326,7 @@ export default function AdminCachePage() {
                   </div>
                   <CardContent className="space-y-3 p-4">
                     <div className="line-clamp-3 min-h-[66px] text-sm leading-6 text-stone-700">
-                      {item.prompt || "历史图片，暂无提示词记录"}
+                      {item.action === "video_generate" ? "视频成品 · 私密提示词不在缓存界面显示" : "图片成品 · 私密提示词不在缓存界面显示"}
                     </div>
                     <div className="space-y-1 text-xs leading-5 text-stone-500">
                       <div>模型：{item.model || "—"}</div>
@@ -309,13 +334,15 @@ export default function AdminCachePage() {
                       <div>文件：{item.file_name}</div>
                       <div>时间：{formatDate(item.created_at)}</div>
                       <div>大小：{formatBytes(item.size_bytes)}</div>
+                      {item.image_spec?.requested_size && <div>请求尺寸：{item.image_spec.requested_size} · 出站尺寸：{item.image_spec.sent_size || "未指定（上游默认）"}</div>}
+                      {item.image_spec?.actual_width && <div>实际尺寸：{item.image_spec.actual_width}×{item.image_spec.actual_height} · {item.image_spec.actual_format?.toUpperCase()}{(item.image_spec.frames || 1) > 1 ? ` · ${item.image_spec.frames} 帧` : ""}</div>}
                     </div>
                     <div className="flex gap-2">
-                      <Button variant="outline" className="flex-1" asChild>
+                      {item.action !== "video_generate" && <Button variant="outline" className="flex-1" asChild>
                         <a href={item.url} target="_blank" rel="noreferrer">
                           查看原图
                         </a>
-                      </Button>
+                      </Button>}
                       <Button
                         variant="destructive"
                         className="flex-1"
@@ -332,7 +359,7 @@ export default function AdminCachePage() {
           </div>
           <div className="flex flex-col gap-3 rounded-2xl border border-stone-200 bg-white/90 px-4 py-3 text-sm text-stone-500 lg:flex-row lg:items-center lg:justify-between">
             <div>
-              第 {safePage} / {pageCount} 页，当前显示 {items.length} 张，共 {total} 张
+              第 {safePage} / {pageCount} 页，当前显示 {items.length} 项，共 {total} 项
             </div>
             <div className="flex gap-2">
               <Button

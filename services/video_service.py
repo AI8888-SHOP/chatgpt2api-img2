@@ -293,6 +293,9 @@ class VideoService:
         response["remote_id"] = row["remote_id"]
         if row["result"]:
             response["video"] = json.loads(row["result"])
+            if response["video"].get("cache_deleted"):
+                response["status"] = "expired"
+                response["video"] = {"cache_deleted": True, "cache_deleted_at": response["video"].get("cache_deleted_at")}
         if row["error"]:
             response["error"] = row["error"]
         return response
@@ -506,6 +509,59 @@ class VideoService:
         if not path.is_file():
             raise HTTPException(404, "视频文件不存在")
         return path
+
+    def cache_items(self):
+        return list(self.iter_cache_items())
+
+    def iter_cache_items(self):
+        """Admin metadata only: never expose provider URLs, prompts or credentials."""
+        def rows():
+            with self.connect() as db:
+                yield from db.execute("SELECT id,result,payload,created FROM video_jobs WHERE state='done' AND accounted=1")
+        for row in rows():
+            result = json.loads(row["result"] or "{}")
+            if result.get("cache_deleted"):
+                continue
+            payload = json.loads(row["payload"])
+            path = self.path.parent / "video_results" / (row["id"] + ".mp4")
+            local = bool(result.get("local") and path.is_file())
+            try:
+                size_bytes = path.stat().st_size if local else 0
+            except FileNotFoundError:
+                local, size_bytes = False, 0
+            yield {
+                "id": row["id"], "url": "/admin/api/video-cache/" + row["id"] + "/content" if local else "",
+                "relative_path": "video_results/" + path.name if local else "",
+                "file_name": path.name, "created_at": int(row["created"]),
+                "size_bytes": size_bytes, "content_type": "video/mp4",
+                "model": payload.get("model", ""), "action": "video_generate",
+                "prompt": "", "api_key": "", "api_key_name": "",
+                "storage": "local" if local else "remote_or_missing",
+            }
+
+    def admin_content_path(self, job_id):
+        with self.connect() as db:
+            row = db.execute("SELECT owner FROM video_jobs WHERE id=? AND state='done' AND accounted=1", (job_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "视频文件不存在")
+        return self.content_path(row["owner"], job_id)
+
+    def delete_cache(self, ids):
+        deleted = []
+        with self.lock, self.connect() as db:
+            for job_id in set(ids):
+                row = db.execute("SELECT result FROM video_jobs WHERE id=? AND state='done' AND accounted=1", (job_id,)).fetchone()
+                if not row or json.loads(row["result"] or "{}").get("cache_deleted"):
+                    continue
+                # Exact durable job IDs only; never interpret a supplied URL/path.
+                if not re.fullmatch(r"vid_[a-f0-9]{32}", job_id):
+                    continue
+                (self.path.parent / "video_results" / (job_id + ".mp4")).unlink(missing_ok=True)
+                result = json.loads(row["result"] or "{}")
+                result.update(cache_deleted=True, cache_deleted_at=time.time())
+                db.execute("UPDATE video_jobs SET result=? WHERE id=?", (json.dumps(result), job_id))
+                deleted.append(job_id)
+        return deleted
 
     def run(self):
         while not self.stop_event.is_set():

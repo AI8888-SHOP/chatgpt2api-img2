@@ -1,4 +1,5 @@
 "use client";
+import { imageSizeAllowed } from "@/lib/image-sizes";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type SetStateAction } from "react";
 import { toast } from "sonner";
@@ -182,6 +183,7 @@ function referenceImageToFile(image: StoredReferenceImage, index: number): File 
 function extensionFromType(type: string) {
   if (type.includes("jpeg") || type.includes("jpg")) return "jpg";
   if (type.includes("webp")) return "webp";
+  if (type.includes("gif")) return "gif";
   return "png";
 }
 
@@ -928,6 +930,10 @@ function ImageWorkspace() {
       toast.error("请上传参考图");
       return;
     }
+    if (!imageSizeAllowed(imageModel, imageSize)) {
+      toast.error("请为当前模型选择有效的请求尺寸");
+      return;
+    }
 
     const conversationId = createId();
     const threadId = continuingThreadId || conversationId;
@@ -979,6 +985,8 @@ function ImageWorkspace() {
           const job =
             imageMode === "edit" && referenceImageFiles.length > 0
               ? await createImageEditJob(referenceImageFiles, prompt, requestModel, {
+                  size: imageSize,
+                  output_format: imageOutputFormat,
                   client_conversation_id: conversationId,
                   client_image_id: imageId,
                 })

@@ -151,7 +151,7 @@ class ImageConduitFlowTests(unittest.TestCase):
         ):
             result = service.edit_with_pool("make it brighter", [(PNG_BYTES, "input.png", "image/png")], "grok-imagine-image", 1)
         self.assertEqual(result, expected)
-        edit_upstream.assert_called_once_with("make it brighter", [(PNG_BYTES, "input.png", "image/png")], n=1, metadata=None, model="grok-imagine-image")
+        edit_upstream.assert_called_once_with("make it brighter", [(PNG_BYTES, "input.png", "image/png")], n=1, metadata=None, model="grok-imagine-image", size="auto", output_format="png")
         ensure_pool.assert_not_called()
 
     def test_grok_model_remains_enabled_for_text_to_image(self) -> None:

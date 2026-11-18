@@ -45,7 +45,7 @@ def guess_image_extension(image_data: bytes, content_type: str = "") -> str:
     return ".png"
 
 
-def save_generated_image(image_data: bytes, content_type: str = "") -> StoredGeneratedImage:
+def save_generated_image(image_data: bytes, content_type: str = "", *, record_cache: bool = True) -> StoredGeneratedImage:
     if not image_data:
         raise ValueError("image data is required")
     if len(image_data) > MAX_STORED_IMAGE_BYTES:
@@ -61,15 +61,20 @@ def save_generated_image(image_data: bytes, content_type: str = "") -> StoredGen
 
     file_name = f"{uuid.uuid4().hex}{guess_image_extension(image_data, content_type)}"
     target_path = target_dir / file_name
-    target_path.write_bytes(image_data)
+    try:
+        target_path.write_bytes(image_data)
+    except OSError:
+        target_path.unlink(missing_ok=True)
+        raise
 
     stored_image = StoredGeneratedImage(
         path=target_path,
         url=f"{GENERATED_IMAGES_URL_PREFIX}/{date_path}/{file_name}",
     )
-    generated_image_cache_service.record_image(
-        url=stored_image.url,
-        created_at=int(datetime.utcnow().timestamp()),
-        content_type=content_type,
-    )
+    if record_cache:
+        generated_image_cache_service.record_image(
+            url=stored_image.url,
+            created_at=int(datetime.utcnow().timestamp()),
+            content_type=content_type,
+        )
     return stored_image

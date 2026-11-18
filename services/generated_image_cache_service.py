@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import heapq
+import itertools
+from collections.abc import Iterable
 import os
 import threading
 import time
@@ -103,6 +106,7 @@ class GeneratedImageCacheService:
         action: str = "",
         api_key: str = "",
         api_key_name: str = "",
+        image_spec: dict[str, object] | None = None,
     ) -> dict[str, object] | None:
         normalized_url = self._normalize_url(url)
         target_path = self._resolve_path_from_url(normalized_url)
@@ -123,6 +127,7 @@ class GeneratedImageCacheService:
             "action": str(action or ""),
             "api_key": str(api_key or ""),
             "api_key_name": str(api_key_name or ""),
+            "image_spec": image_spec or {},
         }
 
     def sync_storage(self) -> None:
@@ -216,6 +221,7 @@ class GeneratedImageCacheService:
         action: str = "",
         api_key: str = "",
         api_key_name: str = "",
+        image_spec: dict[str, object] | None = None,
     ) -> dict[str, object] | None:
         record = self._build_record(
             url=url,
@@ -226,6 +232,7 @@ class GeneratedImageCacheService:
             action=action,
             api_key=api_key,
             api_key_name=api_key_name,
+            image_spec=image_spec,
         )
         if record is None:
             return None
@@ -240,8 +247,8 @@ class GeneratedImageCacheService:
                     {
                         key: value
                         for key, value in record.items()
-                        if key in {"relative_path", "file_name", "size_bytes", "content_type", "prompt", "model", "action", "api_key", "api_key_name"}
-                        and value not in ("", 0)
+                        if key in {"relative_path", "file_name", "size_bytes", "content_type", "prompt", "model", "action", "api_key", "api_key_name", "image_spec"}
+                        and value not in ("", 0, {})
                     }
                 )
             self._records.sort(key=lambda item: int(item.get("created_at") or 0), reverse=True)
@@ -267,6 +274,7 @@ class GeneratedImageCacheService:
         action: str = "",
         limit: int = 100,
         offset: int = 0,
+        extra_items: Iterable[dict[str, object]] | None = None,
     ) -> dict[str, object]:
         self.sync_storage()
         normalized_query = str(query or "").strip().lower()
@@ -274,22 +282,25 @@ class GeneratedImageCacheService:
 
         with self._lock:
             records = list(self._records)
-
-        if normalized_query:
-            records = [
-                record
-                for record in records
-                if any(
+        limit = max(1, min(int(limit), 500))
+        offset = max(0, min(int(offset), 10000))
+        total = total_size_bytes = 0
+        def matching():
+            nonlocal total, total_size_bytes
+            for record in itertools.chain(records, extra_items or ()):
+                if normalized_query and not any(
                     normalized_query in str(record.get(field) or "").lower()
-                    for field in ("prompt", "model", "api_key_name", "api_key", "file_name", "action")
-                )
-            ]
-        if normalized_action and normalized_action != "all":
-            records = [record for record in records if str(record.get("action") or "").lower() == normalized_action]
-
-        total = len(records)
-        page_records = records[offset:offset + limit]
-        total_size_bytes = sum(int(record.get("size_bytes") or 0) for record in records)
+                    for field in ("id", "prompt", "model", "api_key_name", "api_key", "file_name", "action")
+                ):
+                    continue
+                if normalized_action not in {"", "all"} and str(record.get("action") or "").lower() != normalized_action:
+                    continue
+                total += 1
+                total_size_bytes += int(record.get("size_bytes") or 0)
+                yield record
+        # Bounded selection; video metadata is consumed once without materializing
+        # all jobs. Exact totals still require a scan of the JSON image index.
+        page_records = heapq.nlargest(offset + limit, matching(), key=lambda item: (int(item.get("created_at") or 0), str(item.get("id") or "")))[offset:]
 
         return {
             "items": page_records,
@@ -299,6 +310,15 @@ class GeneratedImageCacheService:
             "has_more": offset + limit < total,
             "total_size_bytes": total_size_bytes,
         }
+
+    def forget_images(self, urls: list[str]) -> None:
+        """Remove only metadata for a failed, uncommitted image batch."""
+        targets = set(urls)
+        with self._lock:
+            records = [record for record in self._records if record.get("url") not in targets]
+            if len(records) != len(self._records):
+                self._records = records
+                self._save()
 
     def delete_images(self, image_ids: list[str]) -> dict[str, object]:
         normalized_ids = [str(image_id or "").strip() for image_id in image_ids if str(image_id or "").strip()]

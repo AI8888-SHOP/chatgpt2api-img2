@@ -105,6 +105,48 @@ class UsageUpstreamTests(unittest.TestCase):
         return self.client.post(prefix + "/" + kind, data={"prompt": "synthetic edit", "model": "gpt-image-2"},
                                 files={"image": ("test.png", b"synthetic", "image/png")})
 
+    def test_edit_http_form_keeps_dimensions_and_output_format(self):
+        response = self.client.post("/v1/images/edits", data={"prompt": "test", "model": "gpt-image-2", "size": "2048x1152", "output_format": "webp"},
+                                    files={"image": ("ref.png", b"synthetic", "image/png")})
+        self.assertEqual(response.status_code, 200, response.text)
+        fields = self.http.post.call_args.kwargs["data"]
+        self.assertEqual(fields["size"], "2048x1152")
+        self.assertEqual(fields["output_format"], "webp")
+
+    def test_async_edit_form_keeps_dimensions_and_output_format(self):
+        with patch.object(api, "Thread") as thread:
+            response = self.client.post("/v1/image-jobs/edits", data={"prompt": "test", "model": "gpt-image-2", "size": "1152x2048", "output_format": "webp"},
+                                        files={"image": ("ref.png", b"synthetic", "image/png")})
+            self.assertEqual(response.status_code, 200, response.text)
+            args = thread.call_args.kwargs
+            args["target"](*args["args"])
+            fields = self.http.post.call_args.kwargs["data"]
+            self.assertEqual(fields["size"], "1152x2048")
+            self.assertEqual(fields["output_format"], "webp")
+
+    def test_sync_and_async_generation_keep_custom_request_size(self):
+        for prefix in ("/v1/images", "/v1/image-jobs"):
+            with self.subTest(prefix=prefix), patch.object(api, "Thread") as thread:
+                response = self.client.post(prefix + "/generations", json={"prompt": "test", "model": "gpt-image-2", "size": "3840x2160", "output_format": "webp"})
+                self.assertEqual(response.status_code, 200, response.text)
+                if prefix.endswith("image-jobs"):
+                    args = thread.call_args.kwargs
+                    args["target"](*args["args"])
+                fields = self.http.post.call_args.kwargs["json"]
+                self.assertEqual(fields["size"], "3840x2160")
+                self.assertEqual(fields["output_format"], "webp")
+                self.assertFalse({"width", "height", "resolution", "aspect_ratio"} & fields.keys())
+
+    def test_upstream_custom_dimension_rejection_reaches_user_without_defaulting(self):
+        response = requests.Response()
+        response.status_code = 422
+        response._content = b'{"error":{"message":"unsupported size 3840x2160"}}'
+        self.http.post.side_effect = requests.HTTPError(response=response)
+        result = self.client.post("/v1/images/generations", json={"prompt": "test", "model": "gpt-image-2", "size": "3840x2160"})
+        self.assertEqual(result.status_code, 502)
+        self.assertIn("unsupported size 3840x2160", result.text)
+        self.assertTrue(all(call.kwargs["json"]["size"] == "3840x2160" for call in self.http.post.call_args_list))
+
     def test_sync_generation_edit_persist_selected_upstream_and_admin_can_read(self):
         for kind, expected in (("generations", "线路甲"), ("edits", "线路乙")):
             response = self.send("/v1/images", kind)

@@ -1,7 +1,7 @@
 "use client";
 
 import { ArrowUp, ImagePlus, LoaderCircle, Pen, Sparkles, X } from "lucide-react";
-import { useMemo, useState, type ClipboardEvent, type RefObject } from "react";
+import { useEffect, useMemo, useState, type ClipboardEvent, type RefObject } from "react";
 
 import { ImageLightbox } from "@/components/image-lightbox";
 import { PersonalPrompts } from "@/components/personal-prompts";
@@ -90,6 +90,9 @@ export function ImageComposer({
   onOpenMaskEditor,
   isOptimizingPrompt,
 }: ImageComposerProps) {
+  useEffect(() => {
+    if (outputFormat === "gif" && model !== "gpt-image-2.6") onOutputFormatChange("png");
+  }, [model, outputFormat, onOutputFormatChange]);
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [lightboxIndex, setLightboxIndex] = useState(0);
   const lightboxImages = useMemo(
@@ -229,9 +232,9 @@ export function ImageComposer({
 
                 <ImageModelSelect value={model} onChange={onModelChange} availableModels={availableModels} modelsLoading={modelsLoading} />
 
-                <AspectRatioSelect value={size} onChange={onSizeChange} />
+                <AspectRatioSelect value={size} onChange={onSizeChange} model={model} />
 
-                <OutputFormatSelect value={outputFormat} onChange={onOutputFormatChange} />
+                <OutputFormatSelect value={outputFormat} onChange={onOutputFormatChange} allowGif={model === "gpt-image-2.6"} />
 
                 <div className="flex h-9 min-w-0 items-center justify-center gap-1.5 rounded-full border border-white/70 bg-white/80 px-2 py-1.5 sm:gap-2 sm:px-3">
                   <span className="text-xs font-medium text-stone-600">张数</span>
@@ -348,14 +351,14 @@ function QuickPromptSelect({ prompts, onSelect }: { prompts: QuickPromptConfig[]
   );
 }
 
-function OutputFormatSelect({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+function OutputFormatSelect({ value, onChange, allowGif }: { value: string; onChange: (value: string) => void; allowGif: boolean }) {
   return (
     <Select value={value} onValueChange={onChange}>
       <SelectTrigger className="h-9 w-full rounded-full border-white/70 bg-white/80 text-xs font-medium uppercase text-stone-700 shadow-none sm:w-[96px]">
         <SelectValue />
       </SelectTrigger>
       <SelectContent>
-        {formatOptions.map((format) => (
+        {(allowGif ? [...formatOptions, "gif"] : formatOptions).map((format) => (
           <SelectItem key={format} value={format}>
             {format.toUpperCase()}
           </SelectItem>

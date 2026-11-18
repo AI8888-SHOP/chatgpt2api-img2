@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import base64
 import binascii
+from io import BytesIO
+from PIL import Image
 from itertools import count
 from threading import Lock
 import time
@@ -126,10 +128,14 @@ def _upstream_url(upstream: dict[str, object], path: str) -> str:
     return f"{str(upstream.get('base_url') or '').rstrip('/')}/{path.lstrip('/')}"
 
 
-def _record_cache(url: str, content_type: str, prompt: str, metadata: dict[str, str] | None = None) -> None:
+def _record_cache(url: str, content_type: str, prompt: str, metadata: dict[str, str] | None = None, *, image_data: bytes = b"") -> None:
     """记录图片缓存元数据"""
     try:
         meta = metadata or {}
+        image_spec = {key: str(meta[key]) for key in ("requested_size", "sent_size", "requested_format") if key in meta}
+        if image_data:
+            with Image.open(BytesIO(image_data)) as image:
+                image_spec.update(actual_width=image.width, actual_height=image.height, actual_format=str(image.format).lower(), frames=getattr(image, "n_frames", 1))
         generated_image_cache_service.record_image(
             url=url,
             created_at=int(time.time()),
@@ -139,9 +145,10 @@ def _record_cache(url: str, content_type: str, prompt: str, metadata: dict[str, 
             action=str(meta.get("action") or "image_generate"),
             api_key=str(meta.get("api_key") or ""),
             api_key_name=str(meta.get("api_key_name") or ""),
+            image_spec=image_spec,
         )
     except Exception as exc:
-        print(f"[upstream-image] cache record fail error={exc}")
+        raise ImageGenerationError("图片缓存元数据保存失败") from exc
 
 
 def _normalize_image_content_type(value: str) -> str:
@@ -172,7 +179,7 @@ def _download_image_limited(
     ) as response:
         response.raise_for_status()
         content_type = _normalize_image_content_type(response.headers.get("content-type", "image/png"))
-        if content_type and content_type not in ALLOWED_IMAGE_CONTENT_TYPES:
+        if content_type and content_type not in ALLOWED_IMAGE_CONTENT_TYPES | {"application/octet-stream"}:
             raise ImageGenerationError(f"unsupported upstream image content type: {content_type}")
         expected_length = int(response.headers.get("content-length") or 0)
         if expected_length > MAX_UPSTREAM_IMAGE_BYTES:
@@ -194,14 +201,14 @@ def _process_upstream_images(
     prompt: str,
     metadata: dict[str, str] | None = None,
     upstream: dict[str, object] | None = None,
+    output_format: str = "",
 ) -> list[dict]:
-    """处理上游返回的图片（b64_json 或 url），存到本地"""
-    stored_items = []
+    """Validate the whole batch before publishing files; roll back on save failure."""
+    prepared = []
     for item in image_items:
         if not isinstance(item, dict):
-            continue
-
-        # 优先处理 b64_json
+            raise ImageGenerationError("上游图片结果结构无效")
+        error = ImageGenerationError("上游未返回可验证的图片")
         if item.get("b64_json"):
             try:
                 raw_b64 = str(item["b64_json"] or "")
@@ -210,35 +217,66 @@ def _process_upstream_images(
                 img_data = base64.b64decode(raw_b64, validate=True)
                 if len(img_data) > MAX_UPSTREAM_IMAGE_BYTES:
                     raise ImageGenerationError("upstream image is too large")
-                stored = save_generated_image(img_data, "image/png")
-                stored_items.append({
-                    "url": stored.url,
-                    "revised_prompt": item.get("revised_prompt", prompt),
-                })
-                _record_cache(stored.url, "image/png", prompt, metadata)
+                content_type = _verified_image_type(img_data, output_format)
+                prepared.append((img_data, content_type, item))
                 continue
             except (binascii.Error, ValueError, ImageGenerationError) as exc:
-                print(f"[upstream-image] b64 decode fail error={exc}")
-
-        # 处理 URL
+                error = exc if isinstance(exc, ImageGenerationError) else ImageGenerationError("上游图片 Base64 无效")
         if item.get("url"):
             url = str(item["url"])
             try:
                 image_data, content_type = _download_image_limited(url, upstream)
-                stored = save_generated_image(image_data, content_type)
-                stored_items.append({
-                    "url": stored.url,
-                    "revised_prompt": item.get("revised_prompt", prompt),
-                })
-                _record_cache(stored.url, content_type, prompt, metadata)
+                content_type = _verified_image_type(image_data, output_format)
+                prepared.append((image_data, content_type, item))
                 continue
             except Exception as exc:
-                print(f"[upstream-image] download fail url={url[:80]} error={exc}")
+                error = exc if isinstance(exc, ImageGenerationError) else ImageGenerationError("上游图片下载失败")
+        raise error
 
-        # 兜底：直接返回原始数据
-        stored_items.append(item)
+    saved = []
+    stored_items = []
+    try:
+        for image_data, content_type, item in prepared:
+            stored = save_generated_image(image_data, content_type, record_cache=False)
+            saved.append(stored)
+            _record_cache(stored.url, content_type, prompt, metadata, image_data=image_data)
+            stored_items.append({"url": stored.url, "revised_prompt": item.get("revised_prompt", prompt)})
+        return stored_items
+    except Exception as exc:
+        try:
+            generated_image_cache_service.forget_images([stored.url for stored in saved])
+        finally:
+            for stored in saved:
+                stored.path.unlink(missing_ok=True)
+        raise ImageGenerationError("图片批次保存失败，已撤销本批次成品") from exc
 
-    return stored_items
+
+def _verified_image_type(data: bytes, requested: str = "") -> str:
+    try:
+        with Image.open(BytesIO(data)) as image:
+            actual = str(image.format or "").lower()
+            if actual == "gif":
+                if image.n_frames > 1000:
+                    raise ValueError("too many GIF frames")
+                image.seek(image.n_frames - 1)
+                image.load()
+            else:
+                image.verify()
+    except Exception as exc:
+        raise ImageGenerationError("上游图片数据无效") from exc
+    mime = "image/" + actual
+    if mime not in ALLOWED_IMAGE_CONTENT_TYPES:
+        raise ImageGenerationError("不支持的上游图片格式")
+    if requested == "gif" and actual != "gif":
+        raise ImageGenerationError("请求 GIF，但上游未返回真实 GIF 图片")
+    return mime
+
+
+def _validate_output_format(model: str, output_format: str) -> None:
+    if output_format not in {"png", "jpeg", "webp", "gif"}:
+        raise ImageGenerationError("不支持的图片格式")
+    if output_format == "gif" and model.lower() != "gpt-image-2.6":
+        raise ImageGenerationError("GIF 仅向 gpt-image-2.6 上游请求，其他模型暂不支持")
 
 
 def generate_image_upstream(
@@ -264,6 +302,7 @@ def generate_image_upstream(
     if metadata is not None:
         metadata["upstream_name"] = str(upstream.get("name") or "未命名上游")[:200]
     upstream_model = _model_for_upstream(upstream, model)
+    _validate_output_format(upstream_model, output_format)
     record_metadata = {
         **(metadata or {}),
         "model": upstream_model,
@@ -291,6 +330,7 @@ def generate_image_upstream(
         if moderation and moderation != "auto":
             body["moderation"] = moderation
 
+    record_metadata.update(requested_size=size, sent_size=str(body.get("size", "")), requested_format=output_format)
     print(
         f"[upstream-image] generate upstream={upstream.get('name')} "
         f"base={upstream.get('base_url')} prompt={prompt[:60]}... n={n} quality={quality} size={size}"
@@ -328,7 +368,7 @@ def generate_image_upstream(
 
     data = resp.json()
     image_items = data.get("data") or []
-    stored_items = _process_upstream_images(image_items, prompt, record_metadata, upstream)
+    stored_items = _process_upstream_images(image_items, prompt, record_metadata, upstream, output_format)
 
     if not stored_items:
         raise ImageGenerationError("upstream API returned no images")
@@ -346,6 +386,9 @@ def edit_image_upstream(
     metadata: dict[str, str] | None = None,
     model: str = "",
     _attempt: int = 0,
+    *,
+    size: str = "auto",
+    output_format: str = "png",
 ) -> dict:
     """调用上游 API 编辑图片 POST /v1/images/edits (multipart)"""
     prompt = str(prompt or "").strip()
@@ -359,12 +402,21 @@ def edit_image_upstream(
         metadata["upstream_name"] = str(upstream.get("name") or "未命名上游")[:200]
     configured_model = _model_for_upstream(upstream, model)
     upstream_model = GROK_IMAGE_EDIT_MODEL if configured_model == GROK_IMAGE_MODEL else configured_model
+    _validate_output_format(upstream_model, output_format)
+    fields = {"prompt": prompt, "model": upstream_model, "n": str(n), "response_format": "url"}
+    if upstream_model == GROK_IMAGE_EDIT_MODEL:
+        fields["size"] = _normalize_grok_generation_size(size)
+    else:
+        if size and size != "auto":
+            fields["size"] = size
+        fields["output_format"] = output_format
     record_metadata = {
         **(metadata or {}),
         "model": upstream_model,
         "upstream_name": str(upstream.get("name") or ""),
     }
 
+    record_metadata.update(requested_size=size, sent_size=str(fields.get("size", "")), requested_format=output_format)
     print(
         f"[upstream-image] edit upstream={upstream.get('name')} "
         f"base={upstream.get('base_url')} prompt={prompt[:60]}... images={len(images)} n={n}"
@@ -379,13 +431,7 @@ def edit_image_upstream(
 
             resp = client.post(
                 _upstream_url(upstream, "/images/edits"),
-                data={
-                    "prompt": prompt,
-                    "model": upstream_model,
-                    "n": str(n),
-                    "size": "1024x1024",
-                    "response_format": "url",
-                },
+                data=fields,
                 files=files,
                 timeout=TIMEOUT,
             )
@@ -403,18 +449,18 @@ def edit_image_upstream(
         if "insufficient_balance" in msg.lower() or "insufficient account balance" in msg.lower():
             _cooldown_upstream(upstream, "insufficient_balance")
         if _attempt < 2:
-            return edit_image_upstream(prompt, images, n, metadata, model, _attempt + 1)
+            return edit_image_upstream(prompt, images, n, metadata, model, _attempt + 1, size=size, output_format=output_format)
         raise ImageGenerationError(msg) from exc
     except requests.RequestException as exc:
         msg = f"upstream API request failed: {exc}"
         print(f"[upstream-image] edit fail {msg}")
         if _attempt < 2:
-            return edit_image_upstream(prompt, images, n, metadata, model, _attempt + 1)
+            return edit_image_upstream(prompt, images, n, metadata, model, _attempt + 1, size=size, output_format=output_format)
         raise ImageGenerationError(msg) from exc
 
     data = resp.json()
     image_items = data.get("data") or []
-    stored_items = _process_upstream_images(image_items, prompt, record_metadata, upstream)
+    stored_items = _process_upstream_images(image_items, prompt, record_metadata, upstream, output_format)
 
     if not stored_items:
         raise ImageGenerationError("upstream API returned no images")

@@ -60,7 +60,9 @@ export function ImageLightbox({
     if (!current) return;
     const link = document.createElement("a");
     link.href = current.src;
-    link.download = `image-${current.id}.png`;
+    const extension = current.src.match(/\.(png|jpe?g|webp|gif)(?:[?#]|$)/i)?.[1]
+      || current.src.match(/^data:image\/(png|jpeg|webp|gif);/i)?.[1];
+    link.download = `image-${current.id}${extension ? `.${extension}` : ""}`;
     link.click();
   }, [current]);
 

@@ -705,7 +705,7 @@ export async function optimizeImagePrompt(prompt: string) {
   });
 }
 
-export async function editImage(files: File | File[], prompt: string, model: ImageModel = "gpt-image-2") {
+export async function editImage(files: File | File[], prompt: string, model: ImageModel = "gpt-image-2", params?: { size?: string; output_format?: string }) {
   const formData = new FormData();
   const uploadFiles = Array.isArray(files) ? files : [files];
 
@@ -715,6 +715,8 @@ export async function editImage(files: File | File[], prompt: string, model: Ima
   formData.append("prompt", prompt);
   formData.append("model", model);
   formData.append("n", "1");
+  if (params?.size) formData.append("size", params.size);
+  if (params?.output_format) formData.append("output_format", params.output_format);
 
   return httpRequest<{ created: number; data: Array<{ url: string; revised_prompt?: string }> }>(
     "/v1/images/edits",
@@ -730,7 +732,7 @@ export async function createImageEditJob(
   files: File | File[],
   prompt: string,
   model: ImageModel = "gpt-image-2",
-  clientIds?: { client_conversation_id?: string; client_image_id?: string },
+  clientIds?: { client_conversation_id?: string; client_image_id?: string; size?: string; output_format?: string },
 ) {
   const formData = new FormData();
   const uploadFiles = Array.isArray(files) ? files : [files];
@@ -743,6 +745,8 @@ export async function createImageEditJob(
   formData.append("n", "1");
   if (clientIds?.client_conversation_id) formData.append("client_conversation_id", clientIds.client_conversation_id);
   if (clientIds?.client_image_id) formData.append("client_image_id", clientIds.client_image_id);
+  if (clientIds?.size) formData.append("size", clientIds.size);
+  if (clientIds?.output_format) formData.append("output_format", clientIds.output_format);
 
   return httpRequest<{ job_id: string; status: string }>("/v1/image-jobs/edits", {
     method: "POST",
@@ -1105,6 +1109,7 @@ export type UsageStats = {
 };
 
 export type GeneratedImageCacheItem = {
+  image_spec?: { requested_size?: string; sent_size?: string; requested_format?: string; actual_width?: number; actual_height?: number; actual_format?: string; frames?: number };
   id: string;
   url: string;
   relative_path: string;

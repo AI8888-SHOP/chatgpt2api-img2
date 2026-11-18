@@ -1,4 +1,5 @@
 import tempfile
+import os
 import io
 import json
 import time
@@ -50,6 +51,122 @@ class VideoTests(unittest.TestCase):
 
     def create(self):
         return self.service.create(self.user, self.body)["request_id"]
+
+    def test_grok_native_ratio_resolution_duration_and_snapshot(self):
+        from services.video_config import VideoModel
+        for protocol in ("grok", "native"):
+            model = VideoModel(id="grok-imagine-video", protocol=protocol, resolutions=["1080p"]).model_dump()
+            for ratio in ("16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3"):
+                body = VideoRequest(prompt="test", duration=10, resolution="1080p", aspect_ratio=ratio, mode="image", reference_images=[{"asset_id": "a" * 32}])
+                with patch.object(self.service.assets, "resolve", return_value="https://files.test/ref.png"):
+                    payload = self.service.prepare_payload(self.user, body, model)
+                self.assertEqual(payload["aspect_ratio"], ratio)
+                self.assertEqual(payload["resolution"], "1080p")
+                self.assertEqual(payload["seconds" if protocol == "native" else "duration"], 10)
+                self.assertNotIn("duration" if protocol == "native" else "seconds", payload)
+                self.assertFalse({"size", "width", "height", "ratio"} & payload.keys())
+        job_id = self.create()
+        original = dict(self.row(job_id))
+        self.config.update({**self.config.get(), "video_models": [{"id": "grok-imagine-video", "protocol": "native"}]})
+        self.assertEqual(self.row(job_id)["payload"], original["payload"])
+        self.assertEqual(self.row(job_id)["channel"], original["channel"])
+
+    def test_admin_video_cache_private_access_statistics_and_cleanup(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from admin import api as admin_api
+        job_id = self.create()
+        self.tick(job_id, {"request_id": "remote"})
+        self.tick(job_id, {"status": "done", "video": {"url": "https://private.test/movie?signature=SECRET"}})
+        self.tick(job_id)
+        path = self.service.path.parent / "video_results" / (job_id + ".mp4")
+        path.parent.mkdir()
+        fixture = os.environ.get("EXISTING_VIDEO_FIXTURE")
+        path.write_bytes(Path(fixture).read_bytes() if fixture else b"synthetic-video-bytes")
+        original_result = {"local": True, "url": "/v1/video-jobs/" + job_id + "/content", "sha256": "retained-audit-marker", "remote_url": "https://private.test/movie?signature=SECRET", "remote_id": "remote"}
+        self.service.update(job_id, result=json.dumps(original_result))
+        original_row = dict(self.row(job_id))
+        self.service.update(job_id, created=time.time() - 120)
+        pending_id = self.create()
+        pending_file = path.parent / (pending_id + ".mp4")
+        pending_file.write_bytes(b"in-progress-file")
+        image = io.BytesIO()
+        Image.new("RGB", (16, 16)).save(image, format="PNG")
+        reference_id = self.service.assets.save(self.user.id, image.getvalue(), "image")["asset_id"]
+        reference_path = self.service.assets.root / reference_id
+        original_balance = self.users.get_user(self.user.id).quota
+        app = FastAPI()
+        # No cache record registration: a fresh service discovers historical jobs.
+        app.state.videos = VideoService(self.config, self.users, self.service.path, self.log)
+        app.include_router(admin_api.router)
+        with closing(TestClient(app)) as client, patch.object(admin_api, "config", Mock(auth_key="synthetic-admin")), patch.object(admin_api.generated_image_cache_service, "sync_storage"), patch.object(admin_api.generated_image_cache_service, "_records", []), patch.object(admin_api.generated_image_cache_service, "delete_images", side_effect=lambda ids: {"deleted": 0, "missing_ids": []}), patch.object(admin_api.admin_audit_service, "log"):
+            url = "/admin/api/video-cache/" + job_id + "/content"
+            self.assertEqual(client.get(url).status_code, 401)
+            self.assertEqual(client.get(url, headers={"Authorization": "Bearer usr_wrong"}).status_code, 401)
+            headers = {"Authorization": "Bearer synthetic-admin"}
+            listing = client.get("/admin/api/generated-images?action=video_generate", headers=headers)
+            self.assertEqual(listing.status_code, 200, listing.text)
+            self.assertEqual(listing.json()["total_size_bytes"], path.stat().st_size)
+            self.assertEqual(listing.json()["total"], 1)
+            self.assertNotIn("SECRET", listing.text)
+            self.assertNotIn(self.body.prompt, listing.text)
+            self.assertNotIn("private-key", listing.text)
+            result = client.get(url, headers=headers)
+            self.assertEqual(result.content, path.read_bytes())
+            self.assertEqual(result.headers["cache-control"], "private, no-store")
+            self.assertEqual(client.head(url, headers=headers).status_code, 200)
+            with self.assertRaises(HTTPException):
+                self.service.content_path("other-owner", job_id)
+            for expected in (1, 0):
+                response = client.request("DELETE", "/admin/api/generated-images", headers=headers, json={"ids": [job_id, pending_id, reference_id]})
+                self.assertEqual(response.json()["deleted"], expected)
+                self.assertEqual(admin_api.admin_audit_service.log.call_args.args[3]["video_ids"], [job_id] if expected else [])
+            self.assertFalse(path.exists())
+            self.assertTrue(pending_file.exists())
+            self.assertTrue(reference_path.exists())
+            final_row = dict(self.row(job_id))
+            for key in ("payload", "state", "accounted", "amount", "reservation"):
+                self.assertEqual(final_row[key], original_row[key])
+            final_result = json.loads(final_row["result"])
+            self.assertTrue(final_result["cache_deleted"])
+            self.assertGreater(final_result["cache_deleted_at"], 0)
+            for key, value in original_result.items():
+                self.assertEqual(final_result[key], value)
+            self.assertEqual(client.get(url, headers=headers).status_code, 404)
+            self.assertEqual(client.get("/admin/api/generated-images", headers=headers).json()["total_size_bytes"], 0)
+            self.assertEqual(self.service.get(self.user.id, job_id)["status"], "expired")
+            self.assertEqual(self.users.get_user(self.user.id).quota, original_balance)
+
+    def test_mixed_asset_pages_and_remote_only_video_never_expose_private_data(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from admin import api as admin_api
+        job_ids = []
+        for i in range(2):
+            job_id = self.create()
+            self.tick(job_id, {"request_id": "remote-" + str(i)})
+            self.tick(job_id, {"status": "done", "video": {"url": "https://private.test/movie?signature=SECRET"}})
+            self.tick(job_id)
+            job_ids.append(job_id)
+            self.service.update(job_id, created=time.time() - 120 * (i + 1))
+        image_record = {"id": "image-id", "url": "/generated-images/synthetic.png", "created_at": 1, "size_bytes": 123, "action": "image_generate", "prompt": "PRIVATE_IMAGE_PROMPT", "api_key": "PRIVATE_IMAGE_KEY"}
+        app = FastAPI()
+        app.state.videos = self.service
+        app.include_router(admin_api.router)
+        with closing(TestClient(app)) as client, patch.object(admin_api, "config", Mock(auth_key="synthetic-admin")), patch.object(admin_api.generated_image_cache_service, "sync_storage"), patch.object(admin_api.generated_image_cache_service, "_records", [image_record]), patch("services.video_service.requests.Session") as network:
+            headers = {"Authorization": "Bearer synthetic-admin"}
+            pages = [client.get(f"/admin/api/generated-images?limit=1&offset={offset}", headers=headers).json() for offset in range(3)]
+            self.assertEqual({page["items"][0]["id"] for page in pages}, {*job_ids, "image-id"})
+            self.assertTrue(all(page["total"] == 3 and page["total_size_bytes"] == 123 for page in pages))
+            self.assertEqual([page["has_more"] for page in pages], [True, True, False])
+            raw = json.dumps(pages)
+            for secret in ("SECRET", "private.test", "PRIVATE_IMAGE_KEY", "PRIVATE_IMAGE_PROMPT", self.body.prompt):
+                self.assertNotIn(secret, raw)
+            videos = client.get("/admin/api/generated-images?action=video_generate", headers=headers).json()
+            self.assertEqual(videos["total"], 2)
+            self.assertEqual(videos["total_size_bytes"], 0)
+            self.assertTrue(all(not item["url"] and item["storage"] == "remote_or_missing" for item in videos["items"]))
+            network.assert_not_called()
 
     def test_video_model_price_overrides_global(self):
         self.config.update({**self.config.get(), "video_credits_per_second": 1, "video_models": [{"id": "grok-imagine-video", "price_480p": 7}]})

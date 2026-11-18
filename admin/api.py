@@ -4,8 +4,8 @@
 """
 from datetime import datetime
 from services.display_time import format_display_time
-from fastapi import APIRouter, HTTPException, Header, Query
-from fastapi.responses import Response
+from fastapi import APIRouter, HTTPException, Header, Query, Request
+from fastapi.responses import Response, FileResponse
 from io import BytesIO
 from PIL import Image, ImageOps
 from pydantic import BaseModel, Field
@@ -72,7 +72,7 @@ class CreateKeyRequest(BaseModel):
 
 
 class DeleteGeneratedImagesRequest(BaseModel):
-    ids: list[str] = Field(default_factory=list, description="图片缓存记录 ID 列表")
+    ids: list[str] = Field(default_factory=list, max_length=500, description="图片或视频缓存记录 ID 列表")
 
 
 class AdminCreateUserRequest(BaseModel):
@@ -494,11 +494,12 @@ async def clear_usage_records(
 
 
 @router.get("/generated-images")
-async def list_generated_images(
+def list_generated_images(
+    request: Request,
     query: str = Query(default=""),
     action: str = Query(default="all"),
     limit: int = Query(default=60, ge=1, le=500),
-    offset: int = Query(default=0, ge=0),
+    offset: int = Query(default=0, ge=0, le=10000),
     authorization: str | None = Header(default=None),
 ):
     require_admin(authorization)
@@ -507,18 +508,33 @@ async def list_generated_images(
         action=action,
         limit=limit,
         offset=offset,
+        extra_items=request.app.state.videos.iter_cache_items() if action in {"all", "", "video_generate"} else [],
     )
+    # Cache browsing needs neither raw credentials nor private user prompts.
+    result["items"] = [{**item, "api_key": "", "prompt": ""} for item in result["items"]]
     return result
+
+
+@router.api_route("/video-cache/{job_id}/content", methods=["GET", "HEAD"])
+async def admin_video_content(job_id: str, request: Request, authorization: str | None = Header(default=None)):
+    require_admin(authorization)
+    path = request.app.state.videos.admin_content_path(job_id)
+    return FileResponse(path, media_type="video/mp4", headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})
 
 
 @router.delete("/generated-images")
 async def delete_generated_images(
     body: DeleteGeneratedImagesRequest,
+    request: Request,
     authorization: str | None = Header(default=None),
 ):
     admin_key = require_admin(authorization)
-    result = generated_image_cache_service.delete_images(body.ids)
-    admin_audit_service.log(admin_key, "image_cache.delete", "", {"requested": len(body.ids), "deleted": result.get("deleted", 0)})
+    video_ids = [value for value in body.ids if value.startswith("vid_")]
+    result = generated_image_cache_service.delete_images([value for value in body.ids if value not in video_ids])
+    deleted = request.app.state.videos.delete_cache(video_ids)
+    result["deleted"] += len(deleted)
+    result["missing_ids"] += [value for value in video_ids if value not in deleted]
+    admin_audit_service.log(admin_key, "image_cache.delete", "", {"requested": len(body.ids), "deleted": result.get("deleted", 0), "video_ids": deleted})
     return {
         "success": True,
         **result,
