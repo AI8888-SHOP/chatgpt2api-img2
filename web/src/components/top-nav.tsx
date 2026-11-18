@@ -1,6 +1,6 @@
 "use client";
 
-import { Aperture, Compass, CreditCard, FileStack, History, ImageIcon, LogOut, Menu, Shield, User, X } from "lucide-react";
+import { Aperture, Compass, CreditCard, FileStack, History, ImageIcon, Film, BookOpen, LogOut, Menu, Shield, User, X } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
@@ -19,8 +19,10 @@ const adminNavItems = [
 ];
 const userNavItems = [
   { href: "/image", label: "画图工作台", icon: ImageIcon },
+  { href: "/video", label: "视频工作室", icon: Film },
   { href: "/editable-files", label: "PPT / PSD", icon: FileStack },
   { href: "/api-keys", label: "个人中心", icon: User },
+  { href: "/api-docs", label: "API 接入文档", icon: BookOpen },
   { href: "/recharge", label: "自助充值", icon: CreditCard },
 ];
 

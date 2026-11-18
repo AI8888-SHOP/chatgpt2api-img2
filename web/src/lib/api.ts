@@ -10,7 +10,10 @@ export const savePersonalPrompt = (body: { label: string; content: string }, id?
 export const deletePersonalPrompt = (id: string) => httpRequest<{ ok: boolean }>(`/v1/user/prompt-presets/${encodeURIComponent(id)}`, { method: "DELETE", authScope: "user" });
 export type VideoModelConfig = {
   price_480p?: number | null; price_720p?: number | null; price_1080p?: number | null;
-  id: string; label: string; enabled: boolean; protocol: "grok" | "seedance" | "native";
+  id: string; label: string; enabled: boolean; protocol: "grok" | "seedance" | "native" | "image2pro";
+  capability_profile?: "" | "veo_lite" | "veo_fast" | "veo_quality" | "omni_11" | "omni_12";
+  durations?: number[]; duration_default?: number; resolution_default?: string; aspect_ratios?: string[];
+  supports_reference_images?: boolean; supports_frame_control?: boolean; poll_interval_ms?: number;
   grok_endpoint?: "generations" | "videos";
   supports_video_reference?: boolean; supports_edit?: boolean; supports_extend?: boolean;
   max_reference_images: number; supports_voice: boolean; supports_audio_upload: boolean;
@@ -21,13 +24,14 @@ export type VideoChannelConfig = { name: string; base_url: string; api_key: stri
 export type VideoJob = {
   request_id: string; status: string; created_at: number; credits: number;
   prompt: string; model: string; duration: number; resolution: string; aspect_ratio: string;
-  mode: string; accounted: boolean; error?: string; video?: { url: string; local?: boolean };
+  mode: string; accounted: boolean; error?: string; video?: { url: string; local?: boolean; media_id?: string; duration?: number; measured_duration?: number; measured_size?: string };
   remote_id?: string; diagnostics?: { time: number; phase: string; http_status: number | null; error_type: string; error_code: string; diagnostic_id: string; upstream_id: string; summary: string }[];
 };
 export type VideoGenerationParams = {
   model: string; prompt: string; duration: number; aspect_ratio: string; resolution: string;
-  mode: "text" | "image" | "reference" | "edit" | "extend"; reference_videos?: { asset_id: string }[]; generate_audio: boolean; client_request_id: string;
-  reference_images: { asset_id: string }[]; reference_audios: { asset_id?: string; voice_id?: string }[];
+  size?: string;
+  mode: "text" | "image" | "reference" | "edit" | "extend"; reference_videos?: ({ asset_id: string } | string)[]; generate_audio: boolean; client_request_id: string;
+  reference_images: { asset_id: string; role?: "first_frame" | "last_frame" }[]; reference_audios: { asset_id?: string; voice_id?: string }[];
 };
 
 export const createVideoJob = (body: VideoGenerationParams) => httpRequest<VideoJob>("/v1/videos/generations", { method: "POST", body, authScope: "user", timeout: 60000 });

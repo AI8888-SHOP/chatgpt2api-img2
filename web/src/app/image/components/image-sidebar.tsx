@@ -1,6 +1,6 @@
 "use client";
 
-import { History, LoaderCircle, PanelLeftClose, PanelLeftOpen, Plus, Trash2 } from "lucide-react";
+import { History, LoaderCircle, PanelLeftClose, PanelLeftOpen, Plus, Trash2, ImageIcon, Film, FileStack, User, BookOpen } from "lucide-react";
 import Link from "next/link";
 import { getStoredImageSrc, type ImageConversation } from "@/store/image-conversations";
 
@@ -15,7 +15,7 @@ export function ImageSidebar({ conversations, isLoadingHistory, generatingIds, s
   return <aside className={"studio-sidebar " + (collapsed ? "is-collapsed" : "")} aria-label="历史记录">
     <div className="studio-sidebar-heading"><span><History size={17} />{!collapsed && "最近对话"}</span><button type="button" className="studio-icon-button" onClick={onToggleCollapsed} aria-label={collapsed ? "展开历史记录" : "收起历史记录"} aria-expanded={!collapsed}>{collapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}</button></div>
     {onNewConversation && <button type="button" className="studio-new-conversation" onClick={onNewConversation} aria-label="新建对话"><Plus size={17} />{!collapsed && "新建对话"}</button>}
-    {!collapsed && <nav className="studio-sidebar-nav" aria-label="创作工具"><Link href="/image" aria-current="page">画图工作台</Link><Link href="/editable-files">PPT / PSD</Link></nav>}
+    <nav className="studio-sidebar-nav" aria-label="创作工具"><Link href="/image" aria-label="画图工作台" aria-current="page"><ImageIcon size={16} />{!collapsed && "画图工作台"}</Link><Link href="/video" aria-label="视频工作室"><Film size={16} />{!collapsed && "视频工作室"}</Link><Link href="/editable-files" aria-label="PPT / PSD"><FileStack size={16} />{!collapsed && "PPT / PSD"}</Link></nav>
     <div className="studio-history-list overflow-y-auto">
       {isLoadingHistory ? <div className="studio-history-empty"><LoaderCircle size={17} className="animate-spin" />{!collapsed && "正在读取会话记录"}</div> : !conversations.length ? <p className="studio-history-empty">{collapsed ? "暂无" : "你的创作会保存在这里"}</p> : conversations.map(conversation => {
         const active = conversation.id === selectedConversationId;
@@ -32,6 +32,7 @@ export function ImageSidebar({ conversations, isLoadingHistory, generatingIds, s
         </div>;
       })}
     </div>
-    {!collapsed && <Link href="/api-keys" className="studio-sidebar-account">个人中心 · 积分与账户</Link>}
+    <Link href="/api-keys" className="studio-sidebar-account" aria-label="个人中心"><User size={16} />{!collapsed && "个人中心 · 积分与账户"}</Link>
+    <Link href="/api-docs" className="studio-sidebar-account" aria-label="API 接入文档"><BookOpen size={16} />{!collapsed && "API 接入文档"}</Link>
   </aside>;
 }

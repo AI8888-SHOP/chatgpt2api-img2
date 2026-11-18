@@ -9,6 +9,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useDesign } from "@/components/design-provider";
 import { PersonalPrompts } from "@/components/personal-prompts";
 import { httpRequest } from "@/lib/request";
+import { referenceLimit, allowedDuration } from "@/lib/video-controls";
 import { createVideoJob, fetchPublicAppConfig, fetchUserKeyInfo, fetchVideoJobs, uploadVideoAsset, type PublicAppConfig, type VideoGenerationParams, type VideoJob } from "@/lib/api";
 
 type Attachment = { id: string; file: File; preview: string; assetId?: string };
@@ -45,6 +46,8 @@ export function VideoWorkspace() {
   const [ratio, setRatio] = useState("16:9");
   const [generateAudio, setGenerateAudio] = useState(true);
   const [voice, setVoice] = useState("");
+  const [frameMode, setFrameMode] = useState(false);
+  const [extendSource, setExtendSource] = useState("");
   const [images, setImages] = useState<Attachment[]>([]);
   const [video, setVideo] = useState<Attachment | null>(null);
   const [audio, setAudio] = useState<Attachment | null>(null);
@@ -66,7 +69,8 @@ export function VideoWorkspace() {
   const editing = mode === "edit" || mode === "extend";
   const referenceMode = mode === "reference";
   const maxDuration = model ? (referenceMode ? model.reference_max_duration : model.max_duration) : 15;
-  const maxImages = mode === "image" ? 1 : model?.max_reference_images || 0;
+  const image2pro = model?.protocol === "image2pro";
+  const maxImages = referenceLimit(model, mode, frameMode);
   const defaultPrice = (resolution === "1080p" ? (config?.video_1080p_credits_per_second ?? (config?.video_credits_per_second || 1) * 4) : resolution === "720p" ? (config?.video_720p_credits_per_second ?? (config?.video_credits_per_second || 1) * 2) : (config?.video_credits_per_second || 1));
   const unitPrice = model?.[`price_${resolution}` as "price_480p" | "price_720p" | "price_1080p"] ?? defaultPrice;
   const price = duration * unitPrice;
@@ -101,13 +105,14 @@ export function VideoWorkspace() {
   useEffect(() => () => { previews.current.forEach(url => URL.revokeObjectURL(url)); }, []);
   useEffect(() => {
     if (!model) return;
-    setDuration(value => Math.max(model.min_duration, Math.min(value, maxDuration)));
-    setResolution(value => model.resolutions.includes(value as "480p" | "720p" | "1080p") ? value : model.resolutions[0]);
-  }, [model, maxDuration]);
+    setDuration(value => allowedDuration(model, value, maxDuration));
+    setResolution(value => model.protocol === "image2pro" && mode === "extend" ? "720p" : model.resolutions.includes(value as "480p" | "720p" | "1080p") ? value : model.resolution_default || model.resolutions[0]);
+    setRatio(value => !model.aspect_ratios?.length || model.aspect_ratios.includes(value) ? value : model.aspect_ratios[0]);
+  }, [model, maxDuration, mode]);
 
   const changed = () => { request.current = null; setSubmitError(""); };
   const release = (item: Attachment) => { URL.revokeObjectURL(item.preview); previews.current.delete(item.preview); };
-  const clearReferences = () => { images.forEach(release); if (video) release(video); setVideo(null); if (audio) release(audio); setImages([]); setAudio(null); setVoice(""); };
+  const clearReferences = () => { images.forEach(release); if (video) release(video); setVideo(null); if (audio) release(audio); setImages([]); setAudio(null); setVoice(""); setFrameMode(false); setExtendSource(""); };
   const changeMode = (next: VideoGenerationParams["mode"]) => { changed(); clearReferences(); setMode(next); };
   const attach = async (files: File[], kind: "image" | "audio" | "video") => {
     changed();
@@ -128,7 +133,7 @@ export function VideoWorkspace() {
   const submit = async () => {
     if (submitting.current || !model || !prompt.trim() || active) return;
     if (mode === "image" && images.length !== 1) return toast.error("请添加一张首帧图片");
-    if (editing && !video) return toast.error("请上传需要编辑或延长的视频");
+    if (editing && (image2pro ? !extendSource : !video)) return toast.error("请选择需要延长的原视频或上传素材");
     if (referenceMode && !video && !images.length && !audio && !voice.trim()) return toast.error("请添加参考图或音频");
     if (audio && !images.length) return toast.error("参考音频需搭配至少一张参考图");
     const voiceIds = voice.split(",").map(value => value.trim()).filter(Boolean);
@@ -136,11 +141,11 @@ export function VideoWorkspace() {
     submitting.current = true; setBusy(true); setSubmitError("");
     try {
       if (!request.current) {
-        const imageIds: { asset_id: string }[] = [];
+        const imageIds: { asset_id: string; role?: "first_frame" | "last_frame" }[] = [];
         for (const [index, item] of images.entries()) {
           setStage(`上传参考图 ${index + 1}/${images.length}`);
           const id = item.assetId || (await uploadVideoAsset(item.file, "image")).asset_id;
-          item.assetId = id; imageIds.push({ asset_id: id });
+          item.assetId = id; imageIds.push({ asset_id: id, ...(image2pro && model.supports_frame_control && (frameMode || model.supports_reference_images === false || mode === "image") ? {role: index === 0 ? "first_frame" as const : "last_frame" as const} : {}) });
         }
         const audios: { asset_id?: string; voice_id?: string }[] = [];
         if (audio) {
@@ -149,7 +154,8 @@ export function VideoWorkspace() {
           audio.assetId = id; audios.push({ asset_id: id });
         }
         if (voiceIds.length) audios.push(...voiceIds.map(voice_id => ({ voice_id })));
-        const videoIds: { asset_id: string }[] = [];
+        const videoIds: ({ asset_id: string } | string)[] = [];
+        if (image2pro && mode === "extend") videoIds.push(extendSource);
         if (video) { setStage("上传参考视频"); const id = video.assetId || (await uploadVideoAsset(video.file, "video")).asset_id; video.assetId = id; videoIds.push({ asset_id: id }); }
         request.current = { reference_videos: videoIds, model: model.id, prompt: prompt.trim(), duration, resolution, aspect_ratio: ratio, mode, generate_audio: generateAudio, reference_images: imageIds, reference_audios: audios, client_request_id: crypto.randomUUID() };
       }
@@ -194,7 +200,9 @@ export function VideoWorkspace() {
           {model?.supports_edit && <Button size="sm" variant={mode === "edit" ? "default" : "outline"} onClick={() => changeMode("edit")}>编辑视频</Button>}
           {model?.supports_extend && <Button size="sm" variant={mode === "extend" ? "default" : "outline"} onClick={() => changeMode("extend")}>延长视频</Button>}
         </div>
-        {(editing || (referenceMode && model?.supports_video_reference)) && <div className="space-y-2"><label>添加视频<input aria-label="上传参考视频" type="file" accept="video/mp4,.mp4" onChange={e => { void attach(Array.from(e.target.files || []), "video"); e.target.value = ""; }} /></label><p className="text-xs text-muted-foreground">MP4，最多50 MB、1–60秒。{editing ? "画面尺寸跟随原视频；清晰度选择用于计费档位，未强制传给上游。" : ""}</p>{video && <><video controls src={video.preview} className="w-full rounded" /><Button onClick={() => { changed(); release(video); setVideo(null); }}>移除视频</Button></>}</div>}
+        {image2pro && mode === "extend" && <label className="block text-sm">续写本人同模型已完成视频（8秒720p）<select className={selectClass} value={extendSource} onChange={e => { changed(); setExtendSource(e.target.value); }}><option value="">请选择原成品</option>{jobs.filter(job => job.model === modelId && job.status === "done" && job.accounted && job.video?.media_id).map(job => <option key={job.request_id} value={`extend://${job.video!.media_id}`}>{job.request_id}</option>)}</select></label>}
+        {!image2pro && (editing || (referenceMode && model?.supports_video_reference)) && <div className="space-y-2"><label>添加视频<input aria-label="上传参考视频" type="file" accept="video/mp4,.mp4" onChange={e => { void attach(Array.from(e.target.files || []), "video"); e.target.value = ""; }} /></label><p className="text-xs text-muted-foreground">MP4，最多50 MB、1–60秒。{editing ? "画面尺寸跟随原视频；清晰度选择用于计费档位，未强制传给上游。" : ""}</p>{video && <><video controls src={video.preview} className="w-full rounded" /><Button onClick={() => { changed(); release(video); setVideo(null); }}>移除视频</Button></>}</div>}
+        {image2pro && model?.supports_frame_control && referenceMode && <label className="block text-sm"><input type="checkbox" checked={frameMode || model.supports_reference_images === false} disabled={model.supports_reference_images === false} onChange={e => { changed(); clearReferences(); setFrameMode(e.target.checked); }} />首尾帧：第一张首帧、第二张尾帧；不勾选时为普通参考图</label>}
         <label className="block space-y-2 text-sm">视频提示词<Textarea aria-label="视频提示词" maxLength={8000} className="min-h-36 resize-y" placeholder="例如：清晨海边，女孩回头微笑，镜头缓慢推进，海浪声自然轻柔…" value={prompt} onChange={e => { changed(); setPrompt(e.target.value); }} /><span className="block text-right text-xs text-muted-foreground">{prompt.length}/8000</span></label>
         {!editing && mode !== "text" && Boolean(model?.max_reference_images) && <div className="space-y-2">
           <label className="flex cursor-pointer items-center gap-2 rounded-lg border border-dashed p-3 text-sm"><ImagePlus size={18} />{mode === "image" ? "添加首帧图片" : `添加参考图（${images.length}/${maxImages}）`}<input aria-label="上传视频参考图" type="file" accept="image/png,image/jpeg,image/webp" multiple={mode === "reference"} className="sr-only" disabled={busy || images.length >= maxImages} onChange={e => { void attach(Array.from(e.target.files || []), "image"); e.target.value = ""; }} /></label>
@@ -204,10 +212,11 @@ export function VideoWorkspace() {
         {referenceMode && model?.supports_voice && <label className="block space-y-2 text-sm">参考音色<Input aria-label="参考音色" placeholder="例如 eve,leo（最多三个）" value={voice} onChange={e => { changed(); setGenerateAudio(true); setVoice(e.target.value); }} /><span className="block text-xs text-muted-foreground">预设音色 ID，在提示词中用 &lt;AUDIO_0&gt; 指定第一个声音。此模型不接受自有音频文件。</span></label>}
         {referenceMode && model?.supports_audio_upload && <div className="space-y-2"><label className="flex cursor-pointer items-center gap-2 rounded-lg border border-dashed p-3 text-sm"><Music2 size={18} />添加参考音频<input aria-label="上传视频参考音频" type="file" accept=".mp3,.wav,audio/mpeg,audio/wav" className="sr-only" onChange={e => { setGenerateAudio(true); void attach(Array.from(e.target.files || []), "audio"); e.target.value = ""; }} /></label><p className="text-xs text-muted-foreground">MP3/WAV，2–15 秒，最多 20 MB；需搭配参考图。</p>{audio && <div className="space-y-2"><audio controls src={audio.preview} className="w-full" /><Button size="sm" variant="ghost" onClick={() => { changed(); release(audio); setAudio(null); }}><X size={14} />移除音频</Button></div>}</div>}
         <div className="grid grid-cols-2 gap-3">
-          <label className="space-y-2 text-sm">时长（秒）<Input aria-label="视频时长" type="number" min={model?.min_duration || 1} max={maxDuration} value={duration} onChange={e => { changed(); setDuration(Math.max(model?.min_duration || 1, Math.min(maxDuration, Math.trunc(Number(e.target.value) || 1)))); }} /></label>
-          <label className="space-y-2 text-sm">清晰度<select aria-label="视频清晰度" className={selectClass} value={resolution} onChange={e => { changed(); setResolution(e.target.value); }}>{model?.resolutions.map(r => <option key={r}>{r}</option>)}</select></label>
-          <label className="space-y-2 text-sm">画面比例<select aria-label="视频比例" className={selectClass} disabled={editing || (mode === "image" && model?.protocol === "grok")} value={ratio} onChange={e => { changed(); setRatio(e.target.value); }}>{ratios.map(r => <option key={r}>{r}</option>)}</select></label>
-          <label className="flex items-center gap-2 self-end py-3 text-sm"><input type="checkbox" checked={generateAudio} disabled={Boolean(audio || voice.trim())} onChange={e => { changed(); setGenerateAudio(e.target.checked); }} />生成声音</label>
+          <label className="space-y-2 text-sm">时长（秒）{model?.durations?.length ? <select aria-label="视频时长" className={selectClass} value={duration} onChange={e => { changed(); setDuration(Number(e.target.value)); }}>{model.durations.map(value => <option key={value} value={value}>{value}秒</option>)}</select> : <Input aria-label="视频时长" type="number" min={model?.min_duration || 1} max={maxDuration} value={duration} onChange={e => { changed(); setDuration(Math.max(model?.min_duration || 1, Math.min(maxDuration, Math.trunc(Number(e.target.value) || 1)))); }} />}</label>
+          <label className="space-y-2 text-sm">清晰度<select aria-label="视频清晰度" className={selectClass} value={resolution} disabled={image2pro && mode === "extend"} onChange={e => { changed(); setResolution(e.target.value); }}>{model?.resolutions.map(r => <option key={r}>{r}</option>)}</select></label>
+          <label className="space-y-2 text-sm">画面比例<select aria-label="视频比例" className={selectClass} disabled={(!image2pro && editing) || (mode === "image" && model?.protocol === "grok")} value={ratio} onChange={e => { changed(); setRatio(e.target.value); }}>{(model?.aspect_ratios || ratios).map(r => <option key={r}>{r}</option>)}</select></label>
+          {!image2pro && <label className="flex items-center gap-2 self-end py-3 text-sm"><input type="checkbox" checked={generateAudio} disabled={Boolean(audio || voice.trim())} onChange={e => { changed(); setGenerateAudio(e.target.checked); }} />生成声音</label>}
+          {image2pro && <p className="text-xs">对应尺寸：{resolution === "1080p" ? ratio === "9:16" ? "1080x1920" : "1920x1080" : ratio === "9:16" ? "720x1280" : "1280x720"}；不支持音频参考。</p>}
         </div>
         <div className="rounded-lg bg-muted/30 p-3 text-sm"><div className="flex justify-between"><span>预计积分（{unitPrice} 积分/秒 × {duration} 秒）</span><strong>{price}</strong></div><p className="mt-1 text-xs text-muted-foreground">提交前预扣，明确失败自动退回。按所选清晰度及申请时长计费。</p></div>
         {submitError && <p role="alert" className="text-sm text-red-600 dark:text-red-400">{submitError}；重试相同提交会复用任务，不会重复创建。</p>}

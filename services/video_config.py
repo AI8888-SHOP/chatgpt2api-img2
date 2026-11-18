@@ -10,7 +10,15 @@ class VideoModel(BaseModel):
     id: str = Field(min_length=1, max_length=100)
     label: str = Field(default="", max_length=80)
     enabled: bool = True
-    protocol: Literal["grok", "seedance", "native"] = "grok"
+    protocol: Literal["grok", "seedance", "native", "image2pro"] = "grok"
+    capability_profile: Literal["", "veo_lite", "veo_fast", "veo_quality", "omni_11", "omni_12"] = ""
+    durations: list[int] = Field(default_factory=list)
+    aspect_ratios: list[str] = Field(default_factory=lambda: ["16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3"])
+    duration_default: int = Field(default=5, ge=1, le=15)
+    resolution_default: str = "480p"
+    supports_reference_images: bool = True
+    supports_frame_control: bool = False
+    poll_interval_ms: int = Field(default=10000, ge=5000, le=300000)
     grok_endpoint: Literal["generations", "videos"] = "generations"
     max_reference_images: int = Field(default=7, ge=0, le=14)
     supports_voice: bool = False
@@ -28,7 +36,25 @@ class VideoModel(BaseModel):
 
     @model_validator(mode="after")
     def capabilities(self):
-        if self.protocol != "native" and (self.supports_video_reference or self.supports_edit or self.supports_extend):
+        if self.protocol == "image2pro":
+            if not self.capability_profile:
+                raise ValueError("Image2Pro 必须显式选择已核实的能力类型，不能按模型名猜测")
+            veo = self.capability_profile.startswith("veo_")
+            self.durations = [8] if veo else [15] if self.capability_profile == "omni_12" else [4, 6, 8, 10]
+            self.duration_default = 8 if veo or self.capability_profile == "omni_11" else 15
+            self.min_duration, self.max_duration = min(self.durations), max(self.durations)
+            self.reference_max_duration = self.max_duration
+            self.resolutions = ["720p", "1080p"] if veo else ["720p"]
+            self.resolution_default = "720p"
+            self.aspect_ratios = ["16:9", "9:16"]
+            self.supports_reference_images = self.capability_profile != "veo_quality"
+            self.supports_frame_control = veo
+            self.max_reference_images = 2 if not self.supports_reference_images else 3
+            self.supports_extend = veo
+            self.supports_edit = self.supports_video_reference = self.supports_voice = self.supports_audio_upload = False
+        elif self.capability_profile:
+            raise ValueError("能力类型仅适用于 Image2Pro 协议")
+        if self.protocol not in {"native", "image2pro"} and (self.supports_video_reference or self.supports_edit or self.supports_extend):
             raise ValueError("参考视频、编辑/延长目前仅支持原生视频协议")
         if self.min_duration > self.max_duration or not self.min_duration <= self.reference_max_duration <= self.max_duration:
             raise ValueError("视频时长范围无效")

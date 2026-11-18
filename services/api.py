@@ -924,12 +924,43 @@ def create_app() -> FastAPI:
     prompt_optimizer = PromptOptimizerService(OptimizerLimits(DATA_DIR / "prompt_optimizer_limits.db"))
     video_upload_users = set()
 
+    @app.middleware("http")
+    async def bound_video_json(request: Request, call_next):
+        if request.method == "POST" and request.url.path in {"/v1/videos", "/v1/videos/generations"}:
+            try:
+                _, user = require_user(request.headers.get("authorization"))
+                if user.id in video_upload_users or len(video_upload_users) >= 4:
+                    return JSONResponse({"detail": "视频素材处理繁忙"}, status_code=429)
+                video_upload_users.add(user.id)
+                try:
+                    raw = bytearray()
+                    async with asyncio.timeout(60):
+                        async for chunk in request.stream():
+                            if len(raw) + len(chunk) > 24 * 1024 * 1024:
+                                return JSONResponse({"detail": "视频请求最多24MB"}, status_code=413)
+                            raw.extend(chunk)
+                    request._body = bytes(raw)
+                    return await call_next(request)
+                finally:
+                    video_upload_users.discard(user.id)
+            except HTTPException as exc:
+                return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+            except TimeoutError:
+                return JSONResponse({"detail": "请求读取超时"}, status_code=408)
+        return await call_next(request)
+
+    @router.get("/v1/video-models")
+    async def video_models(authorization: str | None = Header(default=None)):
+        require_user(authorization)
+        return {"object": "list", "data": [{"id": model["id"], "object": "model", "metadata": model} for model in config.get_public_video_config()["video_models"]]}
+
     @router.get("/v1/video-jobs")
     async def list_videos(authorization: str | None = Header(default=None)):
         _, user = require_user(authorization)
         return await run_in_threadpool(videos.list, user.id)
 
     @router.api_route("/v1/video-jobs/{job_id}/content", methods=["GET", "HEAD"])
+    @router.api_route("/v1/videos/{job_id}/content", methods=["GET", "HEAD"])
     async def video_content(job_id: str, authorization: str | None = Header(default=None)):
         _, user = require_user(authorization)
         path = await run_in_threadpool(videos.content_path, user.id, job_id)
@@ -980,12 +1011,21 @@ def create_app() -> FastAPI:
         path, mime = await run_in_threadpool(videos.assets.public_file, token)
         return FileResponse(path, media_type=mime, headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})
 
+    @router.post("/v1/videos", status_code=202)
     @router.post("/v1/videos/generations", status_code=202)
-    async def create_video(body: VideoRequest, authorization: str | None = Header(default=None)):
+    async def create_video(body: VideoRequest, authorization: str | None = Header(default=None), idempotency_key: str | None = Header(default=None)):
         _, user = require_user(authorization)
+        if idempotency_key:
+            if body.client_request_id and body.client_request_id != idempotency_key:
+                raise HTTPException(400, "Idempotency-Key 与 client_request_id 不一致")
+            try:
+                body = VideoRequest.model_validate({**body.model_dump(), "client_request_id": idempotency_key})
+            except ValueError:
+                raise HTTPException(400, "幂等编号格式无效") from None
         return await run_in_threadpool(videos.create, user, body)
 
     @router.get("/v1/videos/generations/{request_id}")
+    @router.get("/v1/videos/{request_id}")
     async def get_video(request_id: str, authorization: str | None = Header(default=None)):
         _, user = require_user(authorization)
         return await run_in_threadpool(videos.get, user.id, request_id)
@@ -1096,9 +1136,9 @@ def create_app() -> FastAPI:
     async def list_models(authorization: str | None = Header(default=None)):
         require_user(authorization)
         try:
-            return await run_in_threadpool(openai_v1_models.list_models)
+            catalog = await run_in_threadpool(openai_v1_models.list_models)
         except Exception:
-            return {
+            catalog = {
                 "object": "list",
                 "data": [
                     build_model_item(model_id)
@@ -1109,6 +1149,13 @@ def create_app() -> FastAPI:
                     )
                 ],
             }
+        video_models = config.get_public_video_config()["video_models"]
+        image_models = config.get_public_image_models()
+        configured_ids = {model["id"] for model in config.get_video_models()} | {model["id"] for model in image_models}
+        catalog["data"] = [item for item in catalog.get("data", []) if item.get("id") not in configured_ids]
+        catalog["data"].extend({"id": model["id"], "object": "model", "metadata": {**model, "type": "image"}} for model in image_models)
+        catalog["data"].extend({"id": model["id"], "object": "model", "metadata": model} for model in video_models)
+        return catalog
 
     @router.post("/auth/login")
     async def login(authorization: str | None = Header(default=None)):

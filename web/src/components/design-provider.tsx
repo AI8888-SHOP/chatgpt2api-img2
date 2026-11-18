@@ -15,7 +15,7 @@ const DesignContext = createContext<DesignContextValue | null>(null);
 
 export function DesignProvider({ children }: { children: ReactNode }) {
   const pathname = usePathname().replace(/\/+$/, "") || "/";
-  const userArea = ["/image", "/editable-files", "/api-keys", "/recharge"].includes(pathname);
+  const userArea = ["/image", "/video", "/api-docs", "/editable-files", "/api-keys", "/recharge"].includes(pathname);
   const [variant, setVariant] = useState<DesignVariant>("a");
   const [trial, setTrial] = useState<UiTrial | null>(null);
   const [busy, setBusy] = useState(false);

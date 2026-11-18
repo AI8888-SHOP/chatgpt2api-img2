@@ -1,50 +1,43 @@
-# sub2api 视频生成
+# 视频 API 与模型能力
 
-首页 `/image` 提供「生成图片 / 生成视频」切换，保留两套 UI 配色。视频支持文本生成、单图首帧生成、参考素材生成，任务与历史保存在服务端，刷新页面后恢复查询。
+登录本站后访问 /api-docs 查看个人 API Key 的图片生成/编辑、视频全流程 curl 示例及当前模型能力；/video 为独立视频工作室。此文档取代旧版仅 Grok/Seedance 的说明。
 
-后台「视频生成」独立配置 `video_models`、`video_upstreams`、默认视频模型、能力限制和积分单价。一个视频渠道可路由多个模型；视频与图片渠道互不混用。只有启用且有有效渠道的模型会出现在首页。默认关闭；使用上游推理 API Key，不使用 sub2api 管理员登录凭证。
+## 本站契约
 
-| 协议 | 上游路径 | 参考图 | 音频 |
-| --- | --- | --- | --- |
-| Grok | `/v1/videos/generations` | 单图首帧、参考图列表；旧版最多 7 图/10 秒，1.5 最多 14 图/15 秒 | `generate_audio` 控制声音；1.5 支持 `reference_audios[].voice_id`，不开放自有音频上传 |
-| Seedance | `/api/v3/contents/generations/tasks`（也支持 `/v1`、`/v3` 前缀） | `content[].image_url` + `first_frame` 或 `reference_image` | 支持的模型可使用 `content[].audio_url` + `reference_audio`；后台确认能力后开启 |
+Base URL 是本站地址（不含 /v1），使用 Authorization: Bearer YOUR_PERSONAL_API_KEY，不使用管理员或上游密钥。
 
-Grok 的自有音频参考是上游合作伙伴能力，公开 SDK 只支持预设音色，本项目不猜测未公开字段。Seedance 音频上传默认关闭；需确认 sub2api 版本含 Ark 原生接口，实际模型支持参考音频（如相应的 Seedance 2.0 模型），并配置 `video_public_base_url` 为本站可被上游读取的 HTTPS 地址。本机原有 sub2api 0.1.179 的源码不含此原生协议，本次代码修改不升级该服务。
+- GET /v1/models 合并模型目录；GET /v1/video-models 仅返回已启用且已路由的视频及能力 metadata，不含渠道地址或密钥。
+- POST /v1/videos 创建，HTTP202，返回同值 id/request_id（本站任务编号）。
+- GET /v1/videos/{id} 查询；GET /v1/video-jobs 列出本人历史。
+- GET/HEAD /v1/videos/{id}/content 鉴权下载本地成品，非owner拒绝。
+- 保留 /v1/videos/generations 创建、/v1/videos/generations/{id} 查询及 /v1/video-jobs/{id}/content 下载。
 
-后台可配置每个模型的最短/最长时长、参考模式最长时长、参考图上限、480p/720p 和音频能力。模型 ID 可使用上游别名，不要求包含 `video` 字符。
+本站状态为 preparing/queued/submitting/pending/downloading/done/failed/expired/unknown。HTTP200不是生成成功；done且video.local=true后下载。每10秒查询原任务，不重建。
 
-使用本站用户令牌提交（不是上游 Key）：
+## 参数与协议
 
-```http
-POST /v1/videos/generations
-Authorization: Bearer <本站用户令牌>
-Content-Type: application/json
+公共字段：model、prompt、duration、seconds、resolution、aspect_ratio、size、reference_images、reference_videos、client_request_id。duration支持整数/数字串/8s，与seconds共存必须一致。size对应：
+1280x720=720p/16:9，720x1280=720p/9:16，1920x1080=1080p/16:9，1080x1920=1080p/9:16。与分辨率/比例同时给出必须一致并符合模型能力。图片接口使用size，不是resolution。
 
-{"model":"grok-imagine-video","prompt":"海边日出，镜头缓慢推进","duration":5,"aspect_ratio":"16:9","resolution":"480p","mode":"text","generate_audio":true,"client_request_id":"unique-client-request-0001"}
-```
+Grok保持generations或显式videos别名，duration/request_id/done/video.url合同；native使用videos、seconds/id/completed及鉴权content下载；Seedance保留Ark原生合同。Image2Pro使用videos、duration/reference_images/id/completed，从url或output[0].url下载，**上游没有/content**；成品安全转存本站私有缓存，不公开签名源地址。
 
-返回 HTTP 202：`{"request_id":"vid_...","status":"queued","credits":5,"created_at":...}`。
+Image2Pro须后台显式选择协议、能力档位、实际公开模型ID与原生路由渠道，不能按英文标题猜ID：
+- Veo Lite/Fast：8秒、720/1080p、普通参考图1–3张或首尾帧、支持续写。
+- Veo Quality：相同尺寸时长，但只接受带角色首尾帧。
+- Omni1.1：4/6/8/10秒、720p、普通图1–3张。
+- Omni1.2：固定15秒、720p、普通图1–3张。
+Omni不支持帧角色/续写；五类均不支持音频参考。续写固定8秒720p，无图片，必须本人同模型已结算结果的extend://MEDIA_ID或原真实直链，固定原渠道，不是taskID。
 
-用同一用户令牌查询 `GET /v1/videos/generations/{request_id}`；`GET /v1/video-jobs` 返回当前用户最近 50 个任务。状态包括 `queued`、`submitting`、`pending`、`done`、`failed`、`expired`、`unknown`；成功时返回 `video.url`。Seedance 的 `succeeded` 和 `content.video_url` 会统一转换为本站格式。URL 是上游临时下载地址，应及时保存；不提供成品视频的永久本地存储。编辑和延长视频不在本版范围内。
+Image2Pro图片可用公开HTTPS URL、PNG/JPEG/WebP DataURL、{url,role}或owner素材{asset_id,role}。role仅first_frame/last_frame，首尾各最多一张且必须有首帧，不能混普通图。其他协议继续用已有素材合同。POST /v1/video-assets接受multipart kind=image|audio|video与file，受模型能力限制。每图5MB/2000万像素，JSON创建体24MB解析前限流；素材48小时过期，每用户40个/80MB、全站500MB。公网下载禁私网/重定向，固定DNS地址并验证TLS，不带上游Authorization；成品200MB且有时间限制。
 
-上传参考素材：用户鉴权 `POST /v1/video-assets`，multipart 字段 `kind=image|audio`、`file`，返回 `asset_id`。提交时设置 `mode=image|reference`，图片为 `reference_images:[{"asset_id":"..."}]`，音频为 `reference_audios:[{"asset_id":"..."}]`；Grok 音色使用 `reference_audios:[{"voice_id":"eve"}]`（最多三个）。素材归属检查、模型能力校验和时长检查均在扣费前完成。
+## 积分、幂等与恢复
 
-图片支持 PNG/JPEG/WebP，每张 5 MB、最多 2000 万像素；服务端重编码为 JPEG。音频仅支持 MP3/WAV，每个 20 MB、2–15 秒，通过 ffprobe 验证。音频文件最多一个且需配合参考图。素材保存在 `data/video_assets`，48 小时后清理；每用户最多 40 个/80 MB，全站 500 MB。Grok 图片通过 data URI 发送；Seedance 通过 `/video-assets/{随机令牌}` 的限时读取链接发送。链接是供上游读取的访问凭证，持有链接的人在到期前可读取，不要公开分享。实例需能被上游通过 HTTPS 访问，且代理上传大小设置应至少 21 MB。Docker 镜像和 CI 已加入 ffmpeg（含 ffprobe）。
+每模型按离散/固定时长校验，不能通用假定1–15秒或默认5秒480p。按申请时长乘后台分辨率单价预扣，成品保存成功按原预扣结算，明确失败退款；上游实际参数及文件测量值单独记录，不用申请值冒充实际值。每用户每分钟一次、同时一个任务，全站八个。
 
-限制：提示词最多 8000 字符；时长整数 1–15 秒；480p / 720p，两种分辨率的每秒积分可在后台分别设置，默认分别为 1、2。单用户一分钟一次、同时一个未结束任务；全站八个未结束任务。提交前按当时价格预扣，成功按预扣金额结算，明确失败/过期退款。用量记录包含渠道名称。轮询不会重复扣费，用户不能查询他人任务。
+client_request_id/Idempotency-Key为6–120位字母数字、点、下划线或连字符；同时给出须相同。同owner同号返回旧任务，新任务参数冲突409；别名和默认值按原能力快照归一化。旧无指纹任务保留兼容行为，上游使用稳定本站业务编号。原渠道和协议快照不改，重启不重复POST。
 
-任务保存在 `data/video_jobs.db`，不存上游密钥；已有任务绑定原上游地址、密钥指纹及提交时协议。修改模型列表不会影响已提交任务查询；修改/停用渠道后需恢复原配置。客户端重复使用同一 `client_request_id` 会返回同一任务，不重复扣费或生成。应用重启恢复查询，不会重复 POST。部署时必须保留任务库、素材目录及用户数据库；仅支持单进程应用实例。
+创建超时/408/无ID的5xx保持unknown且预扣保留；Image2Pro明确402/413/415等拒绝按失败退款。查询401/403/404/410、七天期限、下载永久错误或六小时期限转unknown供管理员核对；网络暂态仅重试GET。已生成成品不自动退款。管理员通过既有POST /api/video-jobs/{id}/reconcile恢复原remote_id，或仅在明确未生成证据下confirmed_failed=true；不要再创建付费任务代替核查。
 
-提交时网络断开、上游 5xx、返回无法识别的任务 ID，或进程在提交过程中终止时，任务进入 `unknown`，积分保留且占用并发名额，防止重复付费生成。管理员核对上游记录后，使用管理令牌调用：
+本地成品可管理员清理，清理后不可下载但任务/账目仍保留。部署保留data任务库、用户库、素材与成品；仍为单进程部署。
 
-```http
-POST /api/video-jobs/{request_id}/reconcile
-Authorization: Bearer <管理令牌>
-Content-Type: application/json
-
-{"remote_id":"上游真实任务 ID"}
-```
-
-这会恢复查询原任务。只有确认上游未生成时才提交 `{"confirmed_failed":true}` 退款；两个字段不可同时设置。不要用新提交来代替查询。生成完成后端会自动处理结算，无需用户持续开着页面。
-
-协议依据：[sub2api Grok 转发](https://github.com/Wei-Shaw/sub2api/blob/main/backend/internal/service/grok_media.go)、[sub2api Seedance](https://github.com/Wei-Shaw/sub2api/blob/main/docs/seedance-api.md)、[Grok 参考图与音色](https://docs.x.ai/developers/model-capabilities/video/reference-to-video)、[Ark 原生类型](https://github.com/volcengine/volcengine-go-sdk/blob/master/service/arkruntime/model/content_generation.go)。
+本轮现有渠道GET模型列表没有Veo/Omni及能力metadata，生产尚未启用；真实生成未实测。需管理员确认原生/videos可用、实际ID和路由，不能添加名称就宣称可生成。

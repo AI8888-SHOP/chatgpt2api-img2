@@ -17,13 +17,21 @@ from urllib.parse import quote, urlsplit
 
 import requests
 from fastapi import HTTPException
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator, field_validator
 from services.video_assets import VideoAssets
 
 
 class VideoImage(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    asset_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    asset_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
+    url: str | None = Field(default=None, max_length=8_000_000)
+    role: Literal["first_frame", "last_frame"] | None = None
+
+    @model_validator(mode="after")
+    def source(self):
+        if bool(self.asset_id) == bool(self.url):
+            raise ValueError("素材必须提供 asset_id 或 url（二选一）")
+        return self
 
 
 class VideoAudio(BaseModel):
@@ -42,15 +50,43 @@ class VideoRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     model: str = Field(default="grok-imagine-video", min_length=1, max_length=100)
     prompt: str = Field(min_length=1, max_length=8000)
-    duration: int = Field(default=5, ge=1, le=15, strict=True)
-    aspect_ratio: Literal["16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3"] = "16:9"
-    resolution: Literal["480p", "720p", "1080p"] = "480p"
+    duration: int | None = Field(default=None, ge=1, le=15)
+    seconds: int | None = Field(default=None, ge=1, le=15)
+    aspect_ratio: Literal["16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3"] | None = None
+    resolution: Literal["480p", "720p", "1080p"] | None = None
+    size: Literal["1280x720", "720x1280", "1920x1080", "1080x1920"] | None = None
     mode: Literal["text", "image", "reference", "edit", "extend"] = "text"
     reference_videos: list[VideoImage] = Field(default_factory=list, max_length=1)
     reference_images: list[VideoImage] = Field(default_factory=list, max_length=14)
     reference_audios: list[VideoAudio] = Field(default_factory=list, max_length=3)
     generate_audio: bool = True
-    client_request_id: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9_-]{16,80}$")
+    client_request_id: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9_.-]{6,120}$")
+
+    @field_validator("duration", "seconds", mode="before")
+    @classmethod
+    def duration_value(cls, value):
+        if value is None:
+            return value
+        if isinstance(value, bool) or not re.fullmatch(r"[0-9]+s?", str(value)):
+            raise ValueError("时长必须为整数、数字字符串或如 8s")
+        return int(str(value).removesuffix("s"))
+
+    @field_validator("reference_images", "reference_videos", mode="before")
+    @classmethod
+    def references(cls, value):
+        return [{"url": item} if isinstance(item, str) else item for item in value] if isinstance(value, list) else value
+
+    @model_validator(mode="after")
+    def aliases(self):
+        if self.duration is not None and self.seconds is not None and self.duration != self.seconds:
+            raise ValueError("duration 与 seconds 不一致")
+        self.duration = self.duration if self.duration is not None else self.seconds
+        if self.size:
+            resolution, ratio = {"1280x720": ("720p", "16:9"), "720x1280": ("720p", "9:16"), "1920x1080": ("1080p", "16:9"), "1080x1920": ("1080p", "9:16")}[self.size]
+            if (self.resolution and self.resolution != resolution) or (self.aspect_ratio and self.aspect_ratio != ratio):
+                raise ValueError("size 与 resolution/aspect_ratio 不一致")
+            self.resolution, self.aspect_ratio = resolution, ratio
+        return self
 
 
 class VideoReconcileRequest(BaseModel):
@@ -74,7 +110,7 @@ def endpoint(channel, suffix="", protocol="grok", grok_endpoint="generations"):
         return base + "/contents/generations/tasks" + suffix
     if not base.endswith("/v1"):
         base += "/v1"
-    return base + ("/videos" if protocol == "native" or (protocol == "grok" and grok_endpoint == "videos") else "/videos/generations") + suffix
+    return base + ("/videos" if protocol in {"native", "image2pro"} or (protocol == "grok" and grok_endpoint == "videos") else "/videos/generations") + suffix
 
 
 def authenticated_content_endpoint(row, channel):
@@ -159,6 +195,14 @@ class VideoService:
 
     def prepare_payload(self, user, body, model):
         protocol = model["protocol"]
+        body.duration = body.duration if body.duration is not None else model.get("duration_default", 5)
+        body.resolution = body.resolution or model.get("resolution_default", "480p")
+        body.aspect_ratio = body.aspect_ratio or "16:9"
+        if protocol == "image2pro":
+            from services.video_image2pro import prepare
+            return prepare(self, user, body, model)
+        if any(item.url or item.role for item in body.reference_images + body.reference_videos):
+            raise HTTPException(400, "此协议请先上传素材并使用 asset_id；不支持帧角色")
         editing = body.mode in {"edit", "extend"}
         if editing and not model.get("supports_" + body.mode):
             raise HTTPException(400, "所选模型未开放此视频操作")
@@ -233,11 +277,25 @@ class VideoService:
         return payload
 
     def create(self, user, body):
+        original_request = body.model_copy(deep=True)
+        def request_fingerprint(capabilities):
+            canonical = original_request.model_dump(exclude={"client_request_id", "seconds", "size"})
+            canonical["duration"] = original_request.duration if original_request.duration is not None else capabilities.get("duration_default", 5)
+            canonical["resolution"] = original_request.resolution or capabilities.get("resolution_default", "480p")
+            canonical["aspect_ratio"] = original_request.aspect_ratio or "16:9"
+            return hashlib.sha256(json.dumps(canonical, sort_keys=True).encode()).hexdigest()
+        def replay(previous):
+            stored = json.loads(previous["payload"])
+            # Pre-upgrade jobs did not persist a fingerprint: preserve their
+            # established owner-scoped replay contract without touching them.
+            if stored.get("request_fingerprint") and stored["request_fingerprint"] != request_fingerprint(stored.get("capabilities", {})):
+                raise HTTPException(409, "业务编号已用于不同请求，请勿重复生成")
+            return self.get(user.id, previous["id"])
         with self.lock, self.connect() as db:
             if body.client_request_id:
-                previous = db.execute("SELECT id FROM video_jobs WHERE owner=? AND client_request_id=?", (user.id, body.client_request_id)).fetchone()
+                previous = db.execute("SELECT id,payload FROM video_jobs WHERE owner=? AND client_request_id=?", (user.id, body.client_request_id)).fetchone()
                 if previous:
-                    return self.get(user.id, previous["id"])
+                    return replay(previous)
         if self.config.get().get("video_enabled") is not True:
             raise HTTPException(503, "视频生成未启用")
         if not body.prompt.strip():
@@ -246,7 +304,21 @@ class VideoService:
         model = next((m for m in self.config.get_video_models() if m["id"] == body.model and m["enabled"]), None)
         if not channels or not model:
             raise HTTPException(400, "该视频模型没有启用的上游")
+        fingerprint = request_fingerprint(model)
+        # Reject exhausted users before any remote reference fetch. Imports use
+        # the same owned asset quota/validation as uploaded material.
+        if self.users.get_user(user.id).quota < 1:
+            raise HTTPException(402, "用户积分不足")
+        with self.connect() as db:
+            if db.execute("SELECT 1 FROM video_jobs WHERE owner=? AND (created>? OR state NOT IN ('done','failed','expired'))", (user.id, time.time()-60)).fetchone():
+                raise HTTPException(429, "已有任务或每分钟提交次数已达上限")
+        body = body.model_copy(deep=True)
         upstream_payload = self.prepare_payload(user, body, model)
+        source_channel = upstream_payload.pop("_source_channel", None)
+        if source_channel:
+            channels = [channel for channel in channels if channel_key(channel) == source_channel]
+            if not channels:
+                raise HTTPException(400, "续写原渠道不可用，不能换源")
         price = max(1, min(1000, int(self.config.get().get("video_credits_per_second") or 1)))
         if body.resolution == "720p":
             price = int(self.config.get().get("video_720p_credits_per_second", price * 2))
@@ -256,9 +328,9 @@ class VideoService:
         amount = body.duration * price
         with self.lock, self.connect() as db:
             if body.client_request_id:
-                previous = db.execute("SELECT id FROM video_jobs WHERE owner=? AND client_request_id=?", (user.id, body.client_request_id)).fetchone()
+                previous = db.execute("SELECT id,payload FROM video_jobs WHERE owner=? AND client_request_id=?", (user.id, body.client_request_id)).fetchone()
                 if previous:
-                    return self.get(user.id, previous["id"])
+                    return replay(previous)
             active = db.execute("SELECT owner FROM video_jobs WHERE state NOT IN ('done','failed','expired')").fetchall()
             if len(active) >= 8 or any(row["owner"] == user.id for row in active):
                 raise HTTPException(429, "视频任务并发已达上限，请等待已有任务结束")
@@ -268,7 +340,7 @@ class VideoService:
             job_id = "vid_" + uuid.uuid4().hex
             channel = channels[int(time.time_ns()) % len(channels)]
             # Persist before reserving so crash recovery can identify incomplete setup.
-            stored = {**body.model_dump(), "protocol": model["protocol"], "grok_endpoint": model.get("grok_endpoint", "generations"), "upstream_payload": upstream_payload}
+            stored = {**body.model_dump(), "request_fingerprint": fingerprint, "capabilities": model, "protocol": model["protocol"], "grok_endpoint": model.get("grok_endpoint", "generations"), "upstream_payload": upstream_payload}
             db.execute("INSERT INTO video_jobs(id,owner,created,state,payload,channel,upstream_name,amount,client_request_id) VALUES(?,?,?,'preparing',?,?,?,?,?)",
                        (job_id, user.id, time.time(), json.dumps(stored), channel_key(channel), str(channel.get("name") or "sub2api"), amount, body.client_request_id))
             db.commit()
@@ -285,7 +357,7 @@ class VideoService:
             row = db.execute("SELECT * FROM video_jobs WHERE id=? AND owner=?", (job_id, owner)).fetchone()
         if not row:
             raise HTTPException(404, "视频任务不存在")
-        response = {"request_id": row["id"], "status": row["state"], "created_at": row["created"], "credits": row["amount"]}
+        response = {"id": row["id"], "request_id": row["id"], "status": row["state"], "created_at": row["created"], "credits": row["amount"]}
         payload = json.loads(row["payload"])
         response.update({key: payload.get(key) for key in ("prompt", "model", "duration", "resolution", "aspect_ratio", "mode")})
         response["accounted"] = bool(row["accounted"])
@@ -293,6 +365,7 @@ class VideoService:
         response["remote_id"] = row["remote_id"]
         if row["result"]:
             response["video"] = json.loads(row["result"])
+            response["video"].pop("source_url", None)
             if response["video"].get("cache_deleted"):
                 response["status"] = "expired"
                 response["video"] = {"cache_deleted": True, "cache_deleted_at": response["video"].get("cache_deleted_at")}
@@ -309,7 +382,7 @@ class VideoService:
         with self.connect() as db:
             db.execute("UPDATE video_jobs SET " + ",".join(k+"=?" for k in values) + " WHERE id=?", (*values.values(), job_id))
 
-    def record_diagnostic(self, job_id, phase, response=None, error_type="", secret=""):
+    def record_diagnostic(self, job_id, phase, response=None, error_type="", secret="", http_status=None):
         # Allowlisted structural summary only: never persist raw bodies, prompts,
         # exception strings, URLs, base64 or arbitrary provider error messages.
         def token(value):
@@ -327,7 +400,7 @@ class VideoService:
         error = data.get("error") if isinstance(data.get("error"), dict) else {}
         diagnostic = token(response.headers.get("X-Upstream-Ops-Request-Id")) if response is not None else ""
         diagnostic = diagnostic or token(data.get("upstream_ops_request_id"))
-        entry = {"time": time.time(), "phase": phase, "http_status": response.status_code if response is not None else None,
+        entry = {"time": time.time(), "phase": phase, "http_status": response.status_code if response is not None else http_status,
                  "error_type": token(error_type) or token(error.get("type")), "error_code": token(error.get("code")),
                  "diagnostic_id": diagnostic, "upstream_id": token(error.get("request_id")) or token(data.get("request_id")),
                  "summary": "status=" + token(data.get("status")) + "; id=" + ("present" if data.get("id") or data.get("request_id") else "absent")}
@@ -375,13 +448,14 @@ class VideoService:
                     status="success" if row["state"] == "done" else "failed", started_at=row["created"],
                     error=row["error"], upstream_name=row["upstream_name"],
                     usage_amount=row["amount"] if row["state"] == "done" else 0,
-                    details={"duration": payload.get("duration"), "resolution": payload.get("resolution"), "mode": payload.get("mode")},
+                    details={"duration": payload.get("duration"), "resolution": payload.get("resolution"), "mode": payload.get("mode"),
+                             **({"actual": {key: value for key, value in json.loads(row["result"] or "{}").items() if key in {"duration", "resolution", "size", "measured_duration", "measured_size"}}} if protocol == "image2pro" else {})},
                 )
             self.update(row["id"], accounted=1)
             return
         if row["state"] in {"unknown", "preparing"}:
             return
-        if protocol == "native" and time.time() - row["created"] > 7 * 86400:
+        if protocol in {"native", "image2pro"} and time.time() - row["created"] > 7 * 86400:
             self.update(row["id"], state="unknown", error="任务超过网关七天查询期限，请管理员核对原任务；不会重新生成")
             return
         # Model catalog edits must not strand existing paid jobs. Only the
@@ -393,11 +467,18 @@ class VideoService:
         headers = {"Authorization": "Bearer " + str(channel["api_key"])}
         if row["state"] == "downloading":
             self.update(row["id"], next_poll=time.time() + 60)
-            self.download_content(row, channel, headers)
+            if protocol == "image2pro":
+                self.download_image2pro(row)
+            else:
+                self.download_content(row, channel, headers)
             return
         creating = row["state"] == "queued"
         if creating:
             self.update(row["id"], state="submitting")
+            # Owner-scoped durable ID is stable even when caller business IDs collide.
+            headers["Idempotency-Key"] = row["id"]
+            if protocol == "image2pro":
+                payload["upstream_payload"]["client_request_id"] = row["id"]
         response = None
         try:
             with requests.Session() as session:
@@ -407,10 +488,10 @@ class VideoService:
                     response = session.get(endpoint(channel, "/" + quote(row["remote_id"], safe=""), protocol, payload.get("grok_endpoint", "generations")), headers=headers, timeout=(10, 30), allow_redirects=False)
                 self.record_diagnostic(row["id"], "create" if creating else "poll", response, secret=str(channel["api_key"]))
                 if response.status_code >= 400:
-                    if protocol == "native" and not creating and response.status_code in {401, 403, 404, 410}:
+                    if protocol in {"native", "image2pro"} and not creating and response.status_code in {401, 403, 404, 410}:
                         self.update(row["id"], state="unknown", error=f"原任务查询需要管理员核对（HTTP {response.status_code}），不会重新生成")
                         return
-                    if creating and response.status_code in {400,401,403,404,422,429}:
+                    if creating and (response.status_code in {400,401,403,404,422,429} or (protocol == "image2pro" and response.status_code in {402,413,415})):
                         self.update(row["id"], state="failed", error=f"上游拒绝请求（HTTP {response.status_code}）")
                         return
                     raise ValueError("upstream unavailable")
@@ -418,11 +499,11 @@ class VideoService:
                     raise ValueError("unexpected_http_status")
                 data = response.json()
                 if not creating:
-                    delay = data.get("poll_after_ms", data.get("poll_interval_ms", 10000))
+                    delay = data.get("poll_after_ms", data.get("poll_interval_ms", payload.get("capabilities", {}).get("poll_interval_ms", 10000)))
                     delay = delay if isinstance(delay, (int, float)) else 10000
                     self.update(row["id"], next_poll=time.time() + max(5, min(300, delay / 1000)))
                 if creating:
-                    remote_id = data.get("id") if protocol == "native" else data.get("request_id") or data.get("id")
+                    remote_id = data.get("id") if protocol in {"native", "image2pro"} else data.get("request_id") or data.get("id")
                     # Grok adapters sometimes envelope the same task identifier.
                     # Never interpret an error/diagnostic request_id as a task ID.
                     if protocol == "grok" and not remote_id and isinstance(data.get("data"), dict):
@@ -431,7 +512,17 @@ class VideoService:
                         raise ValueError("error_response_without_task")
                     if not isinstance(remote_id, str) or not remote_id or len(remote_id) > 512:
                         raise ValueError("missing request id")
-                    self.update(row["id"], state="pending", remote_id=remote_id, error="")
+                    self.update(row["id"], state="pending", remote_id=remote_id, error="", next_poll=time.time()+max(5, min(300, payload.get("capabilities", {}).get("poll_interval_ms", 10000)/1000)))
+                elif protocol == "image2pro" and data.get("status") == "completed":
+                    from services.video_image2pro import result_metadata
+                    outputs = data.get("output")
+                    output = outputs[0] if isinstance(outputs, list) and outputs and isinstance(outputs[0], dict) else {}
+                    url = data.get("url") or output.get("url")
+                    if not isinstance(url, str) or len(url) > 8192:
+                        raise ValueError("missing video URL")
+                    result = result_metadata({**output, **{k: v for k, v in data.items() if v is not None}})
+                    result.update(source_url=url, download_started_at=time.time())
+                    self.update(row["id"], state="downloading", result=json.dumps(result), error="", next_poll=0)
                 elif protocol == "native" and data.get("status") == "completed":
                     self.update(row["id"], state="downloading", error="")
                 elif data.get("status") == ("succeeded" if protocol == "seedance" else "done") and protocol != "native":
@@ -466,6 +557,45 @@ class VideoService:
                 # parameters, not large data URIs or signed provider fetch URLs.
                 payload.pop("upstream_payload")
                 self.update(row["id"], payload=json.dumps(payload))
+
+    def download_image2pro(self, row):
+        from services.video_safe_http import public_media, MediaHTTPError
+        root = self.path.parent / "video_results"
+        root.mkdir(parents=True, exist_ok=True)
+        target = root / (row["id"] + ".mp4")
+        partial = target.with_suffix(".part")
+        result = json.loads(row["result"] or "{}")
+        try:
+            if time.time() - result.get("download_started_at", row["created"]) > 6 * 3600:
+                self.update(row["id"], state="unknown", error="视频成品链接可能已过期，请管理员核对原任务；不会重新生成或自动退款")
+                return
+            size, started = 0, time.monotonic()
+            with public_media(result["source_url"]) as response, partial.open("wb") as output:
+                for chunk in response.stream(1024 * 1024):
+                    size += len(chunk)
+                    if size > 200 * 1024 * 1024 or time.monotonic() - started > 180:
+                        raise ValueError("download limit")
+                    output.write(chunk)
+            probe = subprocess.run(["ffprobe", "-v", "error", "-protocol_whitelist", "file,pipe", "-show_streams", "-show_format", "-of", "json", str(partial)], capture_output=True, timeout=15, check=True)
+            data = json.loads(probe.stdout)
+            stream = next(s for s in data.get("streams", []) if s.get("codec_type") == "video")
+            result["measured_size"] = str(stream.get("width")) + "x" + str(stream.get("height"))
+            result["measured_duration"] = float(data.get("format", {}).get("duration") or stream.get("duration") or 0)
+            partial.replace(target)
+            result.update(local=True, url="/v1/video-jobs/" + row["id"] + "/content")
+            self.update(row["id"], state="done", result=json.dumps(result), error="")
+        except MediaHTTPError as exc:
+            self.record_diagnostic(row["id"], "download", error_type="media_http_error", http_status=exc.status)
+            if exc.status in {400, 401, 403, 404, 410, 415, 422} or 300 <= exc.status < 400:
+                self.update(row["id"], state="unknown", error=f"视频成品下载被拒绝或链接已过期（HTTP {exc.status}），请管理员核对；不会重新生成或自动退款")
+            else:
+                self.update(row["id"], error="视频成品下载暂不可用，稍后仅重试下载", next_poll=time.time()+300)
+        except Exception:
+            # No re-POST or automatic refund for an already generated video.
+            self.record_diagnostic(row["id"], "download", error_type="media_download_failed")
+            self.update(row["id"], error="视频已生成，成品保存失败或链接过期；保留原任务等待重试/管理员核对，不会重新生成", next_poll=time.time()+300)
+        finally:
+            partial.unlink(missing_ok=True)
 
     def download_content(self, row, channel, headers):
         root = self.path.parent / "video_results"

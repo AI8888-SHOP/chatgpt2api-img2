@@ -510,7 +510,7 @@ class VideoTests(unittest.TestCase):
         self.assertEqual(self.row(job_id)["state"], "failed")
 
     def test_schema_and_base_url(self):
-        for extra in ({"duration": 16}, {"duration": "5"}, {"resolution": "2160p"}, {"prompt": "x" * 8001}, {"n": 2}):
+        for extra in ({"duration": 16}, {"duration": "5.5"}, {"resolution": "2160p"}, {"prompt": "x" * 8001}, {"n": 2}):
             with self.assertRaises(ValidationError):
                 VideoRequest(**{"prompt": "test", **extra})
         for base in ("https://provider.example", "https://provider.example/v1/"):
