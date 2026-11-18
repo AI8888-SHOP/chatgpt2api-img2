@@ -1,6 +1,6 @@
 "use client";
 
-import { Clock3, FileImage, Images, LoaderCircle, PencilLine, RotateCcw, Sparkles } from "lucide-react";
+import { Clock3, FileImage, Film, Images, LoaderCircle, PencilLine, RotateCcw, Sparkles } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { ImageLightbox } from "@/components/image-lightbox";
@@ -12,6 +12,7 @@ type ImageResultsProps = {
   openLightbox: (imageId: string) => void;
   onReuseConversation: (conversation: ImageConversation) => void;
   onUseResultAsReference: (image: StoredImage, index: number) => void | Promise<void>;
+  onUseResultAsVideo: (image: StoredImage, index: number) => void | Promise<void>;
   onSplitAsPsd: (image: StoredImage, index: number) => void | Promise<void>;
   onResumeImageJob: (conversationId: string, imageId: string, jobId: string) => void | Promise<void>;
   formatConversationTime: (value: string) => string;
@@ -23,6 +24,7 @@ export function ImageResults({
   openLightbox,
   onReuseConversation,
   onUseResultAsReference,
+  onUseResultAsVideo,
   onSplitAsPsd,
   onResumeImageJob,
   formatConversationTime,
@@ -151,6 +153,7 @@ export function ImageResults({
                     conversationId={selectedConversation.id}
                     onOpen={openLightbox}
                     onUseAsReference={onUseResultAsReference}
+                    onUseAsVideo={onUseResultAsVideo}
                     onSplitAsPsd={onSplitAsPsd}
                     onResumeImageJob={onResumeImageJob}
                   />
@@ -197,6 +200,7 @@ function ImageResultCard({
   conversationId,
   onOpen,
   onUseAsReference,
+  onUseAsVideo,
   onSplitAsPsd,
   onResumeImageJob,
 }: {
@@ -205,10 +209,12 @@ function ImageResultCard({
   conversationId: string;
   onOpen: (imageId: string) => void;
   onUseAsReference: (image: StoredImage, index: number) => void | Promise<void>;
+  onUseAsVideo: (image: StoredImage, index: number) => void | Promise<void>;
   onSplitAsPsd: (image: StoredImage, index: number) => void | Promise<void>;
   onResumeImageJob: (conversationId: string, imageId: string, jobId: string) => void | Promise<void>;
 }) {
   const imageSrc = getStoredImageSrc(image);
+  const [openingVideo, setOpeningVideo] = useState(false);
 
   if (image.status === "success" && imageSrc) {
     return (
@@ -228,7 +234,11 @@ function ImageResultCard({
             className="inline-flex h-9 items-center justify-center gap-2 rounded-full bg-white/92 px-3 text-xs font-medium text-stone-800 shadow-sm transition hover:bg-white dark:bg-slate-950/84 dark:text-slate-100 dark:hover:bg-slate-900"
           >
             <PencilLine className="size-3.5" />
-            作为参考图
+            编辑图
+          </button>
+          <button type="button" disabled={openingVideo} onClick={async () => { setOpeningVideo(true); try { await onUseAsVideo(image, index); } finally { setOpeningVideo(false); } }} className="inline-flex h-9 items-center justify-center gap-2 rounded-full px-3 text-xs font-medium disabled:opacity-50">
+            {openingVideo ? <LoaderCircle className="size-3.5 animate-spin" /> : <Film className="size-3.5" />}
+            {openingVideo ? "正在准备…" : "图生视频"}
           </button>
           <button
             type="button"

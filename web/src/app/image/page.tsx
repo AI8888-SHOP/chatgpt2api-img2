@@ -10,7 +10,8 @@ import { ImageComposer } from "@/app/image/components/image-composer";
 import { ImageResults } from "@/app/image/components/image-results";
 import { ImageSidebar } from "@/app/image/components/image-sidebar";
 import { MaskEditor } from "@/app/image/components/mask-editor";
-import { VideoWorkspace } from "@/app/image/components/video-workspace";
+import { useRouter } from "next/navigation";
+import { stageVideoReference } from "@/lib/video-reference-draft";
 import { ImageLightbox } from "@/components/image-lightbox";
 import { SideDrawer } from "@/components/ui/side-drawer";
 import {
@@ -233,19 +234,11 @@ async function resultImageToReference(src: string, index: number): Promise<Store
 }
 
 export default function ImagePage() {
-  const [mode, setMode] = useState<"image" | "video">("image");
-  const [videoOpened, setVideoOpened] = useState(false);
-  return <>
-    <nav aria-label="创作类型" className="mb-3 flex gap-2">
-      <button type="button" aria-pressed={mode === "image"} className="rounded-lg border px-5 py-2 text-sm aria-pressed:border-primary aria-pressed:bg-primary aria-pressed:text-primary-foreground" onClick={() => setMode("image")}>生成图片</button>
-      <button type="button" aria-pressed={mode === "video"} className="rounded-lg border px-5 py-2 text-sm aria-pressed:border-primary aria-pressed:bg-primary aria-pressed:text-primary-foreground" onClick={() => { setVideoOpened(true); setMode("video"); }}>生成视频</button>
-    </nav>
-    <div hidden={mode !== "image"}><ImageWorkspace /></div>
-    {videoOpened && <div hidden={mode !== "video"}><VideoWorkspace /></div>}
-  </>;
+  return <ImageWorkspace />;
 }
 
 function ImageWorkspace() {
+  const router = useRouter();
   const { variant } = useDesign();
   const [canvasTurnId, setCanvasTurnId] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -741,6 +734,18 @@ function ImageWorkspace() {
     [applyReferenceImagesToComposer, selectedConversation, selectAvailableModel],
   );
 
+  const handleUseResultAsVideo = useCallback(async (image: StoredImage, index: number) => {
+    const src = getStoredImageSrc(image);
+    if (!src) return;
+    try {
+      const reference = await resultImageToReference(src, index);
+      stageVideoReference(dataUrlToFile(reference.dataUrl, reference.name, reference.type));
+      router.push("/video");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "读取结果图失败，请重试");
+    }
+  }, [router]);
+
   const handleSplitResultAsPsd = useCallback(async (image: StoredImage, index: number) => {
     const src = getStoredImageSrc(image);
     if (!src) return;
@@ -1142,6 +1147,7 @@ function ImageWorkspace() {
       openLightbox={openLightbox}
       onReuseConversation={handleReuseConversation}
       onUseResultAsReference={(image, index) => handleUseResultAsReference(image, index, turn)}
+      onUseResultAsVideo={handleUseResultAsVideo}
       onSplitAsPsd={handleSplitResultAsPsd}
       onResumeImageJob={handleResumeImageJob}
       formatConversationTime={formatConversationTime}

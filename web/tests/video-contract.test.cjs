@@ -4,6 +4,31 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const path=require('node:path');
 const read=file=>fs.readFileSync(path.join(__dirname,'../src',file),'utf8');
+test('image to video handoff is one-shot, expires and rejects unsupported files',async()=>{
+  const {File}=require('node:buffer');
+  const {stageVideoReference,takeVideoReference}=await import('../src/lib/video-reference-draft.js');
+  const file=new File(['image'],'reference.png',{type:'image/png'});
+  stageVideoReference(file);
+  assert.equal(takeVideoReference(),file);
+  assert.equal(takeVideoReference(),null);
+  assert.throws(()=>stageVideoReference(new File(['GIF'],'image.gif',{type:'image/gif'})),/PNG/);
+  assert.throws(()=>stageVideoReference(new File([new Uint8Array(5*1024*1024+1)],'large.png',{type:'image/png'})),/5 MB/);
+  stageVideoReference(file);
+  const now=Date.now;
+  try { Date.now=()=>now()+61000; assert.equal(takeVideoReference(),null); } finally { Date.now=now; }
+  assert.doesNotMatch(read('app/image/page.tsx'),/aria-label="创作类型"|<VideoWorkspace/);
+  assert.match(read('app/image/components/image-results.tsx'),/图生视频/);
+});
+test('video pricing and fixed durations follow model switches',async()=>{
+  const {videoCredits,allowedDuration}=await import('../src/lib/video-controls.js');
+  assert.equal(videoCredits(12,5,'per_request'),12);
+  assert.equal(videoCredits(12,15,'per_request'),12);
+  assert.equal(videoCredits(12,5,'per_second'),60);
+  assert.equal(videoCredits(12,5,undefined),60);
+  assert.equal(allowedDuration({durations:[8],duration_default:8},5,15),8);
+  assert.equal(allowedDuration({durations:[5,10,15],duration_default:15},15,10),5);
+  assert.equal(allowedDuration({durations:[5,10],duration_default:5},10,10),10);
+});
 test('actual UI helpers enforce frame limits and discrete durations across model changes',async()=>{
   const {referenceLimit,allowedDuration}=await import('../src/lib/video-controls.js');
   const veo={protocol:'image2pro',supports_frame_control:true,supports_reference_images:false,max_reference_images:2,durations:[8],duration_default:8,min_duration:8};

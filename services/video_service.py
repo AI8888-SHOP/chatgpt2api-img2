@@ -215,6 +215,8 @@ class VideoService:
         videos = [self.assets.resolve(user.id, video.asset_id, "video", protocol) for video in body.reference_videos]
         has_references = body.mode == "reference" or bool(body.reference_audios)
         maximum = model["reference_max_duration"] if has_references else model["max_duration"]
+        if model.get("durations") and body.duration not in model["durations"]:
+            raise HTTPException(400, "该模型仅支持以下秒数：" + "、".join(map(str, model["durations"])))
         if not model["min_duration"] <= body.duration <= maximum or body.resolution not in model["resolutions"]:
             raise HTTPException(400, "视频时长或分辨率不在所选模型支持范围内")
         if len(body.reference_images) > model["max_reference_images"]:
@@ -325,7 +327,8 @@ class VideoService:
         if body.resolution == "1080p":
             price = int(self.config.get().get("video_1080p_credits_per_second", price * 4))
         price = model.get("price_" + body.resolution) or price
-        amount = body.duration * price
+        billing_mode = model.get("billing_mode", "per_second")
+        amount = price if billing_mode == "per_request" else body.duration * price
         with self.lock, self.connect() as db:
             if body.client_request_id:
                 previous = db.execute("SELECT id,payload FROM video_jobs WHERE owner=? AND client_request_id=?", (user.id, body.client_request_id)).fetchone()
@@ -344,7 +347,7 @@ class VideoService:
             db.execute("INSERT INTO video_jobs(id,owner,created,state,payload,channel,upstream_name,amount,client_request_id) VALUES(?,?,?,'preparing',?,?,?,?,?)",
                        (job_id, user.id, time.time(), json.dumps(stored), channel_key(channel), str(channel.get("name") or "sub2api"), amount, body.client_request_id))
             db.commit()
-            reservation = self.users.reserve_quota(user.id, amount, action="video_generate", model=body.model, metadata={"video_job_id": job_id})
+            reservation = self.users.reserve_quota(user.id, amount, action="video_generate", model=body.model, metadata={"video_job_id": job_id, "billing_mode": billing_mode, "unit_price": price, "duration": body.duration, "resolution": body.resolution})
             if not reservation:
                 db.execute("DELETE FROM video_jobs WHERE id=?", (job_id,))
                 db.commit()

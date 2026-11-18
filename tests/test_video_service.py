@@ -168,6 +168,59 @@ class VideoTests(unittest.TestCase):
             self.assertTrue(all(not item["url"] and item["storage"] == "remote_or_missing" for item in videos["items"]))
             network.assert_not_called()
 
+    def test_per_request_price_snapshot_recovery_and_refund(self):
+        self.config.update({**self.config.get(), "video_models": [{"id": "grok-imagine-video", "billing_mode": "per_request", "price_480p": 7, "price_720p": 12}]})
+        self.body = VideoRequest(prompt="test", duration=10, resolution="720p", client_request_id="flat-price-test")
+        job_id = self.create()
+        self.assertEqual(self.row(job_id)["amount"], 12)
+        self.assertEqual(self.users.get_user(self.user.id).quota, 88)
+        self.config.update({**self.config.get(), "video_models": [{"id": "grok-imagine-video", "billing_mode": "per_second", "price_720p": 9}]})
+        self.service = VideoService(self.config, self.users, self.service.path, self.log)
+        self.assertEqual(self.create(), job_id)
+        self.assertEqual(json.loads(self.row(job_id)["payload"])["capabilities"]["billing_mode"], "per_request")
+        self.tick(job_id, {"request_id": "remote"})
+        self.tick(job_id, {"status": "done", "video": {"url": "https://cdn.example/video.mp4"}})
+        self.tick(job_id)
+        self.tick(job_id)
+        self.assertEqual(self.users.get_user(self.user.id).quota, 88)
+        self.assertEqual(self.row(job_id)["accounted"], 1)
+
+    def test_per_request_definite_rejection_refunds_once(self):
+        self.config.update({**self.config.get(), "video_models": [{"id": "grok-imagine-video", "billing_mode": "per_request", "price_480p": 7, "price_720p": 12}]})
+        job_id = self.create()
+        self.assertEqual(self.users.get_user(self.user.id).quota, 93)
+        self.tick(job_id, {"error": "invalid request"}, status=422)
+        self.tick(job_id)
+        self.tick(job_id)
+        self.assertEqual(self.row(job_id)["state"], "failed")
+        self.assertEqual(self.users.get_user(self.user.id).quota, 100)
+
+    def test_billing_config_requires_explicit_per_request_prices(self):
+        from services.video_config import VideoModel
+        self.assertEqual(VideoModel(id="old").billing_mode, "per_second")
+        for fields in ({"billing_mode": "invalid"}, {"billing_mode": "per_request", "price_480p": 7}, {"billing_mode": "per_request", "price_480p": 0, "price_720p": 12}):
+            with self.assertRaises(ValidationError):
+                VideoModel(id="bad", **fields)
+
+    def test_fixed_durations_validate_before_reservation_and_default(self):
+        self.config.update({**self.config.get(), "video_models": [{"id": "grok-imagine-video", "durations": [8]}]})
+        with self.assertRaises(HTTPException) as exc:
+            self.service.create(self.user, VideoRequest(prompt="test", duration=5))
+        self.assertEqual(exc.exception.status_code, 400)
+        self.assertEqual(self.users.get_user(self.user.id).quota, 100)
+        with self.service.connect() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM video_jobs").fetchone()[0], 0)
+        job = self.service.create(self.user, VideoRequest(prompt="test"))
+        self.assertEqual(job["duration"], 8)
+        self.assertEqual(job["credits"], 8)
+
+    def test_fixed_durations_config_validation(self):
+        from services.video_config import VideoModel
+        self.assertEqual(VideoModel(id="test", durations=[10, 5, 10]).durations, [5, 10])
+        for fields in ({"durations": [0]}, {"durations": [2.5]}, {"durations": [True]}, {"durations": [16]}, {"durations": [8], "max_duration": 7, "reference_max_duration": 7}, {"durations": [15], "reference_max_duration": 10}):
+            with self.assertRaises(ValidationError):
+                VideoModel(id="test", **fields)
+
     def test_video_model_price_overrides_global(self):
         self.config.update({**self.config.get(), "video_credits_per_second": 1, "video_models": [{"id": "grok-imagine-video", "price_480p": 7}]})
         job_id = self.create()

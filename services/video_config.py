@@ -1,5 +1,5 @@
 """Video catalog and channel settings; only explicit public fields leave admin APIs."""
-from typing import Literal
+from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -12,7 +12,7 @@ class VideoModel(BaseModel):
     enabled: bool = True
     protocol: Literal["grok", "seedance", "native", "image2pro"] = "grok"
     capability_profile: Literal["", "veo_lite", "veo_fast", "veo_quality", "omni_11", "omni_12"] = ""
-    durations: list[int] = Field(default_factory=list)
+    durations: list[Annotated[int, Field(strict=True, ge=1, le=15)]] = Field(default_factory=list, max_length=15)
     aspect_ratios: list[str] = Field(default_factory=lambda: ["16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3"])
     duration_default: int = Field(default=5, ge=1, le=15)
     resolution_default: str = "480p"
@@ -26,6 +26,7 @@ class VideoModel(BaseModel):
     supports_video_reference: bool = False
     supports_edit: bool = False
     supports_extend: bool = False
+    billing_mode: Literal["per_second", "per_request"] = "per_second"
     price_480p: int | None = Field(default=None, ge=1, le=10000, strict=True)
     price_720p: int | None = Field(default=None, ge=1, le=10000, strict=True)
     price_1080p: int | None = Field(default=None, ge=1, le=10000, strict=True)
@@ -64,6 +65,16 @@ class VideoModel(BaseModel):
             raise ValueError("原生视频接口不支持预设音色")
         if self.protocol == "seedance" and (self.supports_voice or self.max_reference_images > 9):
             raise ValueError("Seedance 不支持 Grok 预设音色，参考图最多 9 张")
+        if self.durations:
+            self.durations = sorted(set(self.durations))
+            if any(not self.min_duration <= value <= self.max_duration for value in self.durations):
+                raise ValueError("固定可选秒数必须位于模型最短和最长时长范围内")
+            if not any(value <= self.reference_max_duration for value in self.durations):
+                raise ValueError("固定可选秒数至少一项不得超过参考模式最长秒数")
+            if self.duration_default not in self.durations:
+                self.duration_default = self.durations[0]
+        if self.billing_mode == "per_request" and any(getattr(self, "price_" + res) is None for res in self.resolutions):
+            raise ValueError("按次计费必须填写每个已开放清晰度的单次积分，不沿用每秒默认价")
         self.label = self.label or self.id
         return self
 

@@ -9,6 +9,7 @@ export const fetchPersonalPrompts = () => httpRequest<{ items: PersonalPrompt[];
 export const savePersonalPrompt = (body: { label: string; content: string }, id?: string) => httpRequest<PersonalPrompt>(`/v1/user/prompt-presets${id ? '/' + encodeURIComponent(id) : ''}`, { method: id ? "PUT" : "POST", body, authScope: "user" });
 export const deletePersonalPrompt = (id: string) => httpRequest<{ ok: boolean }>(`/v1/user/prompt-presets/${encodeURIComponent(id)}`, { method: "DELETE", authScope: "user" });
 export type VideoModelConfig = {
+  billing_mode?: "per_second" | "per_request";
   price_480p?: number | null; price_720p?: number | null; price_1080p?: number | null;
   id: string; label: string; enabled: boolean; protocol: "grok" | "seedance" | "native" | "image2pro";
   capability_profile?: "" | "veo_lite" | "veo_fast" | "veo_quality" | "omni_11" | "omni_12";

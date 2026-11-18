@@ -11,6 +11,15 @@ export function referenceLimit(model, mode, frameMode) {
  * @param {number} current
  * @param {number} maximum */
 export function allowedDuration(model, current, maximum) {
-  if (model.durations?.length) return model.durations.includes(current) ? current : model.duration_default || model.durations[0];
+  if (model.durations?.length) {
+    const options = model.durations.filter(value => value <= maximum);
+    const preferred = model.duration_default ?? options[0];
+    return options.includes(current) ? current : options.includes(preferred) ? preferred : options[0];
+  }
   return Math.max(model.min_duration, Math.min(current, maximum));
+}
+
+/** @param {number} unitPrice @param {number} duration @param {string | undefined} billingMode */
+export function videoCredits(unitPrice, duration, billingMode) {
+  return billingMode === "per_request" ? unitPrice : duration * unitPrice;
 }

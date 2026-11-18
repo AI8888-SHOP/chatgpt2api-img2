@@ -55,7 +55,7 @@ audio.write('RIFF');audio.writeUInt32LE(audio.length-8,4);audio.write('WAVEfmt '
         return route.fulfill({json:body});
       });
       const page=await context.newPage();page.setDefaultTimeout(15000);page.on('pageerror',e=>errors.push(e.message));
-      const open=async()=>{await page.goto(base+'/image/');await page.getByRole('navigation',{name:'创作类型'}).getByRole('button',{name:'生成视频',exact:true}).click();await page.getByLabel('视频模型',{exact:true}).selectOption(grok.id);};
+      const open=async()=>{await page.goto(base+'/video/');await page.getByLabel('视频模型',{exact:true}).selectOption(grok.id);};
       await open();
       const workspace=page.getByRole('region',{name:'视频创作工作台'});
       check(await workspace.getByRole('button',{name:'编辑视频',exact:true}).count()===0,'disabled model hides editing');
@@ -123,9 +123,9 @@ audio.write('RIFF');audio.writeUInt32LE(audio.length-8,4);audio.write('WAVEfmt '
       await workspace.getByRole('button',{name:'生成视频',exact:true}).click();
       await page.getByText('任务在后台运行，刷新或关闭页面不会中断',{exact:true}).waitFor();
       check(submissions.at(-1).model===ark.id&&submissions.at(-1).reference_audios[0].asset_id==='b'.repeat(32)&&uploads.includes('audio'),'audio upload and Ark submission');
-      await page.getByRole('navigation',{name:'创作类型'}).getByRole('button',{name:'生成图片',exact:true}).click();
+      await page.goto(base+'/image/');
       check(await page.getByLabel('图像提示词').isVisible(),'image composer remains available');
-      publicFailure=true;await page.reload();await page.getByRole('navigation',{name:'创作类型'}).getByRole('button',{name:'生成视频',exact:true}).click();
+      publicFailure=true;await page.goto(base+'/video/');
       await workspace.getByText('模型配置暂不可用',{exact:false}).waitFor();
       check(await workspace.getByRole('button',{name:'生成视频',exact:true}).isDisabled(),'config failure blocks submission');
       publicFailure=false;
