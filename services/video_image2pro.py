@@ -4,7 +4,6 @@ import json
 import re
 import time
 from fastapi import HTTPException
-from services.video_safe_http import public_media
 
 
 def prepare(service, user, body, model):
@@ -49,24 +48,19 @@ def prepare(service, user, body, model):
         for image in images:
             if image.url:
                 try:
-                    if image.url.startswith("data:image/"):
-                        if not re.match(r"^data:image/(png|jpeg|webp);base64,", image.url):
-                            raise ValueError()
-                        raw = base64.b64decode(image.url.split(",", 1)[1], validate=True)
-                    else:
-                        raw = bytearray()
-                        started = time.monotonic()
-                        with public_media(image.url) as response:
-                            for chunk in response.stream(65536):
-                                raw.extend(chunk)
-                                if len(raw) > 5 * 1024 * 1024 or time.monotonic() - started > 30:
-                                    raise ValueError()
-                    image.asset_id = service.assets.save(user.id, bytes(raw), "image")["asset_id"]
+                    prefix = re.match(r"^data:image/(png|jpeg|webp);base64,", image.url)
+                    if not prefix:
+                        raise HTTPException(400, "请先通过视频素材上传接口上传参考图，再使用 asset_id")
+                    encoded = image.url[prefix.end():]
+                    if len(encoded) > 4 * ((5 * 1024 * 1024 + 2) // 3):
+                        raise HTTPException(413, "参考图片最多 5 MB")
+                    raw = base64.b64decode(encoded, validate=True)
+                    image.asset_id = service.assets.save(user.id, raw, "image")["asset_id"]
                     image.url = None
                 except HTTPException:
                     raise
                 except Exception:
-                    raise HTTPException(400, "参考图读取失败：需有效公开HTTPS图片或Base64图片，不允许重定向/内网") from None
+                    raise HTTPException(400, "参考图读取失败：请上传有效图片文件或 Base64 图片") from None
             # Owner/kind/expiry validation before reading; image2pro accepts data
             # URLs so no publicly accessible material route is required.
             with service.connect() as db:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
 from services import chatgpt_service as chatgpt_service_module
 from services import image_service
@@ -16,6 +16,30 @@ PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"test-image"
 
 
 class ImageConduitFlowTests(unittest.TestCase):
+    def test_conduit_transport_after_submission_never_switches_account(self):
+        service = chatgpt_service_module.ChatGPTService()
+        backend = MagicMock()
+        backend.device_id = "device-test"
+        backend.image_submission_started = True
+        with patch.object(openai_backend_api, "OpenAIBackendAPI", return_value=backend), \
+                patch.object(conversation, "stream_image_outputs", side_effect=RuntimeError("curl: (28) read timed out private-provider")) as create, \
+                patch.object(chatgpt_service_module, "account_service") as accounts, \
+                patch.object(type(chatgpt_service_module.config), "image_conduit_flow_enabled", new_callable=PropertyMock, return_value=True):
+            accounts.get_available_access_token.return_value = "synthetic-token"
+            with self.assertRaises(image_service.ImageSubmissionUnknownError):
+                service._generate_single_with_retries("test", "gpt-image-2", deadline=time.monotonic() + 30)
+            create.assert_called_once()
+            accounts.get_available_access_token.assert_called_once()
+
+    def test_multi_image_unknown_is_not_lost_when_one_image_succeeds(self):
+        service = chatgpt_service_module.ChatGPTService()
+        def generate(index):
+            if index == 2:
+                raise image_service.ImageSubmissionUnknownError("uncertain")
+            return {"data": [{"url": "/local.png"}]}
+        with self.assertRaises(image_service.ImageSubmissionUnknownError):
+            service._collect_parallel_results(2, generate)
+
     def test_format_image_result_uses_injected_saver(self) -> None:
         saved: list[bytes] = []
 
@@ -125,7 +149,7 @@ class ImageConduitFlowTests(unittest.TestCase):
             patch.object(openai_backend_api, "OpenAIBackendAPI", Backend),
             patch.object(conversation, "stream_image_outputs", side_effect=timeout),
         ):
-            with self.assertRaises(image_service.ImagePollTimeoutError) as raised:
+            with self.assertRaises(image_service.ImageSubmissionUnknownError) as raised:
                 image_service.generate_image_result_conduit(
                     "access-token",
                     "draw a chair",

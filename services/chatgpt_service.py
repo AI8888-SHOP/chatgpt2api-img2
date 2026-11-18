@@ -13,6 +13,7 @@ from services.config import config
 from services.image_service import (
     ImageGenerationError,
     ImagePollTimeoutError,
+    ImageSubmissionUnknownError,
     edit_image_result_conduit,
     edit_image_result,
     generate_image_result_conduit,
@@ -342,11 +343,9 @@ class ChatGPTService:
         deadline: float | None = None,
         timeout_label_secs: float | None = None,
     ) -> dict:
-        max_poll_timeout_retries = 4
         max_tls_retries = 3
         max_conn_timeout_retries = 3
         max_upstream_session_retries = 3
-        poll_timeout_retries = 0
         tls_retries = 0
         conn_timeout_retries = 0
         upstream_session_retries = 0
@@ -410,17 +409,11 @@ class ChatGPTService:
                 return result
             except ImagePollTimeoutError as exc:
                 account_service.mark_image_result(access_token, False)
-                failures.append(str(exc))
-                poll_timeout_retries += 1
-                remaining = self._remaining_time(deadline)
-                if (remaining is None or remaining > 0) and poll_timeout_retries <= max_poll_timeout_retries:
-                    print(
-                        "[chatgpt-service] image poll timeout, retry with next account "
-                        f"attempt={poll_timeout_retries}/{max_poll_timeout_retries} "
-                        f"token={access_token[:12]}..."
-                    )
-                    continue
-                raise _attach_resume_fields(ImageGenerationError(str(exc)), exc) from exc
+                unknown = _attach_resume_fields(ImageSubmissionUnknownError("图片生成结果待核对，请稍后查询"), exc)
+                raise unknown from exc
+            except ImageSubmissionUnknownError:
+                account_service.mark_image_result(access_token, False)
+                raise
             except Exception as exc:
                 account_service.mark_image_result(access_token, False)
                 message = str(exc)
@@ -470,11 +463,9 @@ class ChatGPTService:
         deadline: float | None = None,
         timeout_label_secs: float | None = None,
     ) -> dict:
-        max_poll_timeout_retries = 4
         max_tls_retries = 3
         max_conn_timeout_retries = 3
         max_upstream_session_retries = 3
-        poll_timeout_retries = 0
         tls_retries = 0
         conn_timeout_retries = 0
         upstream_session_retries = 0
@@ -525,16 +516,11 @@ class ChatGPTService:
                 return result
             except ImagePollTimeoutError as exc:
                 account_service.mark_image_result(access_token, False)
-                poll_timeout_retries += 1
-                remaining = self._remaining_time(deadline)
-                if (remaining is None or remaining > 0) and poll_timeout_retries <= max_poll_timeout_retries:
-                    print(
-                        "[chatgpt-service] image edit poll timeout, retry with next account "
-                        f"attempt={poll_timeout_retries}/{max_poll_timeout_retries} "
-                        f"token={access_token[:12]}..."
-                    )
-                    continue
-                raise _attach_resume_fields(ImageGenerationError(str(exc)), exc) from exc
+                unknown = _attach_resume_fields(ImageSubmissionUnknownError("图片编辑结果待核对，请稍后查询"), exc)
+                raise unknown from exc
+            except ImageSubmissionUnknownError:
+                account_service.mark_image_result(access_token, False)
+                raise
             except Exception as exc:
                 account_service.mark_image_result(access_token, False)
                 message = str(exc)
@@ -579,6 +565,7 @@ class ChatGPTService:
         data: list[dict] = []
         failures: list[str] = []
         resumable_error: Exception | None = None
+        unknown_error: ImageSubmissionUnknownError | None = None
         max_workers = min(max(1, count), config.image_account_concurrency)
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_map = {executor.submit(worker, index): index for index in range(1, count + 1)}
@@ -588,8 +575,12 @@ class ChatGPTService:
                     data.extend(result.get("data") or [])
                 except Exception as exc:
                     failures.append(str(exc))
+                    if isinstance(exc, ImageSubmissionUnknownError):
+                        unknown_error = exc
                     if getattr(exc, "conversation_id", "") and getattr(exc, "access_token", ""):
                         resumable_error = exc
+        if unknown_error is not None:
+            raise unknown_error
         if not data:
             error = ImageGenerationError(failures[0] if failures else "no image returned from account pool")
             if resumable_error is not None:
@@ -642,6 +633,8 @@ class ChatGPTService:
                     timeout_label_secs=timeout_label_secs,
                 )
                 data.extend(result.get("data") or [])
+            except ImageSubmissionUnknownError:
+                raise
             except Exception as exc:
                 failures.append(str(exc))
                 if not data:
@@ -692,6 +685,8 @@ class ChatGPTService:
                     timeout_label_secs=timeout_label_secs,
                 )
                 data.extend(result.get("data") or [])
+            except ImageSubmissionUnknownError:
+                raise
             except Exception as exc:
                 failures.append(str(exc))
                 if not data:

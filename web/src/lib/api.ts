@@ -673,7 +673,7 @@ export async function generateImage(prompt: string, model: ImageModel = "gpt-ima
 export type ImageJobResult = { created: number; data: Array<{ url: string; revised_prompt?: string }> };
 export type ImageJobStatus = {
   job_id: string;
-  status: "pending" | "running" | "success" | "error";
+  status: "pending" | "running" | "success" | "error" | "unknown";
   result?: ImageJobResult | null;
   error?: string;
   progress?: string;

@@ -64,11 +64,17 @@ class ImageGenerationError(Exception):
         conversation_id: str = "",
         access_token: str = "",
         device_id: str = "",
+        status_code: int | None = None,
     ) -> None:
         super().__init__(message)
         self.conversation_id = conversation_id
         self.access_token = access_token
         self.device_id = device_id
+        self.status_code = status_code
+
+
+class ImageSubmissionUnknownError(ImageGenerationError):
+    """The create request may have been accepted; never retry or refund blindly."""
 
 
 class ImagePollTimeoutError(ImageGenerationError):
@@ -530,12 +536,13 @@ def _send_edit_conversation(
             },
             stream=True,
             timeout=_request_timeout(deadline, 180),
+            allow_redirects=False,
         ),
-        retries=3,
+        retries=1,
         deadline=deadline,
     )
     if not response.ok:
-        raise ImageGenerationError(response.text[:400] or f"conversation failed: {response.status_code}")
+        raise ImageGenerationError("图片编辑请求被上游拒绝", status_code=response.status_code)
     return response
 
 
@@ -613,12 +620,13 @@ def _send_conversation(
             },
             stream=True,
             timeout=_request_timeout(deadline, 180),
+            allow_redirects=False,
         ),
-        retries=3,
+        retries=1,
         deadline=deadline,
     )
     if not response.ok:
-        raise ImageGenerationError(response.text[:400] or f"conversation failed: {response.status_code}")
+        raise ImageGenerationError("图片生成请求被上游拒绝", status_code=response.status_code)
     return response
 
 
@@ -1377,7 +1385,7 @@ def _run_conduit_image_result(
             device_id=backend.device_id,
         )
     except BackendImagePollTimeoutError as exc:
-        raise ImagePollTimeoutError(
+        raise ImageSubmissionUnknownError(
             str(exc) or _image_timeout_message(timeout_label),
             conversation_id=str(getattr(exc, "conversation_id", "") or conversation_id),
             access_token=access_token,
@@ -1391,6 +1399,13 @@ def _run_conduit_image_result(
             device_id=backend.device_id,
         ) from exc
     except ProtocolImageGenerationError as exc:
+        if getattr(exc, "submission_unknown", False) or exc.status_code >= 500 or exc.status_code == 408:
+            raise ImageSubmissionUnknownError(
+                "图片生成结果待核对，请稍后查询",
+                conversation_id=str(getattr(exc, "conversation_id", "") or conversation_id),
+                access_token=access_token,
+                device_id=backend.device_id,
+            ) from exc
         raise ImageGenerationError(
             str(exc) or "image generation failed",
             conversation_id=str(getattr(exc, "conversation_id", "") or conversation_id),
@@ -1400,6 +1415,13 @@ def _run_conduit_image_result(
     except ImageGenerationError:
         raise
     except Exception as exc:
+        if getattr(backend, "image_submission_started", False) is True and not (400 <= int(getattr(exc, "status_code", 0) or 0) < 500 and getattr(exc, "status_code", 0) != 408):
+            raise ImageSubmissionUnknownError(
+                "图片生成结果待核对，请稍后查询",
+                conversation_id=str(getattr(exc, "conversation_id", "") or conversation_id),
+                access_token=access_token,
+                device_id=backend.device_id,
+            ) from exc
         raise ImageGenerationError(
             str(exc) or "image generation failed",
             conversation_id=str(getattr(exc, "conversation_id", "") or conversation_id),
@@ -1483,6 +1505,8 @@ def generate_image_result(
         raise ImageGenerationError("token is required")
 
     session, fp = _new_session(access_token)
+    generation_started = False
+    actual_conversation_id = ""
     try:
         request_timeout_secs = float(timeout_secs if timeout_secs is not None else config.image_poll_timeout_secs)
         timeout_label = float(timeout_label_secs if timeout_label_secs is not None else request_timeout_secs)
@@ -1511,6 +1535,7 @@ def generate_image_result(
         _ensure_image_budget(deadline, timeout_label, access_token=access_token, device_id=device_id)
         parent_message_id = str(uuid.uuid4())
         _notify_progress(progress_callback, "generating_image")
+        generation_started = True
         response = _send_conversation(
             session,
             access_token,
@@ -1638,7 +1663,18 @@ def generate_image_result(
             "data": [{"url": result.url, "revised_prompt": result.revised_prompt}],
         }
     except Exception as exc:
-        print(f"[image-upstream] fail token={access_token[:12]}... error={exc}")
+        if generation_started:
+            status_code = getattr(exc, "status_code", None)
+            fields = {
+                "conversation_id": actual_conversation_id or str(getattr(exc, "conversation_id", "") or ""),
+                "access_token": access_token,
+                "device_id": device_id if "device_id" in locals() else "",
+            }
+            if isinstance(status_code, int) and 400 <= status_code < 500 and status_code != 408:
+                raise ImageGenerationError("上游拒绝了图片生成请求，请检查参数", status_code=status_code, **fields) from exc
+            if not isinstance(exc, ImageSubmissionUnknownError):
+                raise ImageSubmissionUnknownError("图片生成结果待核对，请稍后查询", **fields) from exc
+        print(f"[image-upstream] fail model={model} error_type={type(exc).__name__}")
         raise
     finally:
         session.close()
@@ -1699,6 +1735,8 @@ def edit_image_result(
         raise ImageGenerationError("image is required")
 
     session, fp = _new_session(access_token)
+    generation_started = False
+    actual_conversation_id = ""
     try:
         request_timeout_secs = float(timeout_secs if timeout_secs is not None else config.image_poll_timeout_secs)
         timeout_label = float(timeout_label_secs if timeout_label_secs is not None else request_timeout_secs)
@@ -1757,6 +1795,7 @@ def edit_image_result(
         parent_message_id = str(uuid.uuid4())
         _ensure_image_budget(deadline, timeout_label, access_token=access_token, device_id=device_id)
         _notify_progress(progress_callback, "generating_image")
+        generation_started = True
         response = _send_edit_conversation(
             session,
             access_token,
@@ -1892,7 +1931,18 @@ def edit_image_result(
             "data": [{"url": result.url, "revised_prompt": result.revised_prompt}],
         }
     except Exception as exc:
-        print(f"[image-edit-upstream] fail token={access_token[:12]}... error={exc}")
+        if generation_started:
+            status_code = getattr(exc, "status_code", None)
+            fields = {
+                "conversation_id": actual_conversation_id or str(getattr(exc, "conversation_id", "") or ""),
+                "access_token": access_token,
+                "device_id": device_id if "device_id" in locals() else "",
+            }
+            if isinstance(status_code, int) and 400 <= status_code < 500 and status_code != 408:
+                raise ImageGenerationError("上游拒绝了图片编辑请求，请检查参数", status_code=status_code, **fields) from exc
+            if not isinstance(exc, ImageSubmissionUnknownError):
+                raise ImageSubmissionUnknownError("图片编辑结果待核对，请稍后查询", **fields) from exc
+        print(f"[image-edit-upstream] fail model={model} error_type={type(exc).__name__}")
         raise
     finally:
         session.close()

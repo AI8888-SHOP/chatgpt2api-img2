@@ -1,6 +1,6 @@
 "use client";
 
-import { CheckCircle2, Copy, Gift, KeyRound, LoaderCircle, Plus, Power, PowerOff, Trash2 } from "lucide-react";
+import { CheckCircle2, Copy, KeyRound, LoaderCircle, Plus, Power, PowerOff, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
@@ -11,10 +11,8 @@ import { Input } from "@/components/ui/input";
 import {
   createUserApiKey,
   deleteUserApiKey,
-  fetchUserKeyInfo,
   fetchUserApiKeys,
   fetchUserInviteInfo,
-  redeemUserCode,
   updateUserApiKey,
   type UserInviteInfo,
   type UserOwnedApiKey,
@@ -35,13 +33,10 @@ async function copyText(value: string, message = "已复制") {
 export default function UserApiKeysPage() {
   const [items, setItems] = useState<UserOwnedApiKey[]>([]);
   const [invite, setInvite] = useState<UserInviteInfo | null>(null);
-  const [availableQuota, setAvailableQuota] = useState("加载中");
-  const [redeemCode, setRedeemCode] = useState("");
   const [name, setName] = useState("");
   const [createdKey, setCreatedKey] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isCreating, setIsCreating] = useState(false);
-  const [isRedeeming, setIsRedeeming] = useState(false);
   const [mutatingKey, setMutatingKey] = useState<string | null>(null);
   const inviteLink =
     invite && typeof window !== "undefined"
@@ -51,10 +46,9 @@ export default function UserApiKeysPage() {
   const loadItems = async () => {
     setIsLoading(true);
     try {
-      const [keyData, inviteData, quotaData] = await Promise.all([fetchUserApiKeys(), fetchUserInviteInfo(), fetchUserKeyInfo()]);
+      const [keyData, inviteData] = await Promise.all([fetchUserApiKeys(), fetchUserInviteInfo()]);
       setItems(keyData.api_keys);
       setInvite(inviteData.invite);
-      setAvailableQuota(quotaData.remaining === -1 ? "无限" : String(quotaData.remaining));
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "加载 API Key 失败");
     } finally {
@@ -62,24 +56,6 @@ export default function UserApiKeysPage() {
     }
   };
 
-  const handleRedeem = async () => {
-    const code = redeemCode.trim();
-    if (!code) {
-      toast.error("请输入兑换码");
-      return;
-    }
-    setIsRedeeming(true);
-    try {
-      const data = await redeemUserCode(code);
-      setRedeemCode("");
-      setAvailableQuota(data.user.remaining === -1 ? "无限" : String(data.user.remaining));
-      toast.success(`已兑换 ${data.amount} 点积分`);
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "兑换失败");
-    } finally {
-      setIsRedeeming(false);
-    }
-  };
 
   useEffect(() => {
     void loadItems();
@@ -184,43 +160,6 @@ export default function UserApiKeysPage() {
               </div>
             </div>
           ) : null}
-        </CardContent>
-      </Card>
-
-      <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
-        <CardContent className="space-y-3 p-4 sm:p-6">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex items-center gap-3">
-              <div className="flex size-9 items-center justify-center rounded-xl bg-stone-100 sm:size-10">
-                <Gift className="size-5 text-stone-600" />
-              </div>
-              <div>
-                <h2 className="text-base font-semibold tracking-tight sm:text-lg">积分兑换</h2>
-                <p className="text-xs text-stone-500 sm:text-sm">当前积分 {availableQuota}</p>
-              </div>
-            </div>
-            <div className="flex gap-2 sm:min-w-[360px]">
-              <Input
-                value={redeemCode}
-                onChange={(event) => setRedeemCode(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    void handleRedeem();
-                  }
-                }}
-                placeholder="输入兑换码"
-                className="h-10 rounded-xl border-stone-200 bg-white"
-              />
-              <Button
-                className="h-10 shrink-0 rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800"
-                onClick={() => void handleRedeem()}
-                disabled={isRedeeming}
-              >
-                {isRedeeming ? <LoaderCircle className="size-4 animate-spin" /> : null}
-                兑换
-              </Button>
-            </div>
-          </div>
         </CardContent>
       </Card>
 

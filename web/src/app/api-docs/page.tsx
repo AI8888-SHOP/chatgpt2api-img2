@@ -46,6 +46,7 @@ function Documentation() {
     <p>本站 Base URL：<code>{base || "当前站点地址"}</code>（不含 /v1）。在<Link href="/api-keys" className="underline">个人中心</Link>创建个人 API Key，用 Authorization: Bearer 发送；不要使用管理员密钥，也不要将个人密钥放入网页公开代码。以下占位 Key 需替换，本站不会在文档中显示真实密钥。</p>
     {code(`BASE_URL='${base || "https://YOUR_SITE"}'\nAPI_KEY='YOUR_PERSONAL_API_KEY'\ncurl --fail "$BASE_URL/v1/models" -H "Authorization: Bearer $API_KEY"\n# 仅视频模型及实际启用、已路由能力\ncurl --fail "$BASE_URL/v1/video-models" -H "Authorization: Bearer $API_KEY"`)}
     <h2 id="images">图片生成与编辑</h2>
+    <p>参考图片必须上传至本站，不接受 HTTP(S) 图片地址。图片编辑使用 multipart 文件上传，单张最多 25 MiB、合计最多 60 MiB、最多 10 张。Chat Completions / Responses 的图片输入可发送 Base64 Data URL，单张最多 10 MiB、合计最多 60 MiB、最多 10 张；本站接收后转发。计费与网页一致，按后台开放模型的独立价格预扣；提交结果不明时保留预扣，不自动再次提交。</p>
     <p>图片模型使用模型列表中实际可用的 ID。尺寸字段是 size（auto 或宽x高），不是 resolution；output_format 为 png/jpeg/webp，gpt-image-2.6 可请求 gif，但实际供应商 GIF 与尺寸支持未实测。请求参数不保证成品像素，失败会明确报错。图片接口同步返回 data 数组，读取其中 url；不要将视频响应格式用于图片。</p>
     {code(`curl --fail "$BASE_URL/v1/images/generations" -H "Authorization: Bearer $API_KEY" -H 'Content-Type: application/json' --data '{"model":"YOUR_IMAGE_MODEL_ID","prompt":"一只纸船","size":"2048x1152","output_format":"png","n":1}'\n\ncurl --fail "$BASE_URL/v1/images/edits" -H "Authorization: Bearer $API_KEY" -F 'model=YOUR_IMAGE_MODEL_ID' -F 'prompt=让天空变成黄昏' -F 'image=@reference.png' -F 'size=2048x1152' -F 'output_format=png'`)}
     <h2 id="models">可用视频模型</h2><p>此目录与视频工作室同步。调用时请使用模型 ID，并遵循对应的时长、清晰度与素材限制。</p>
@@ -59,8 +60,8 @@ function Documentation() {
     <h2 id="parameters">参数与参考素材</h2>
     <p>duration 接受整数、数字串或 8s；seconds 为别名，同时传必须相同。省略按模型默认值；Omni1.2 默认并仅接受15秒，按15秒计价，不将5/10秒伪装为真实时长。size 可替代 resolution/aspect_ratio，同时提供必须一致。</p>
     <div className="docs-table-wrap"><table><thead><tr><th>size</th><th>resolution</th><th>aspect_ratio</th></tr></thead><tbody>{[["1280x720","720p","16:9"],["720x1280","720p","9:16"],["1920x1080","1080p","16:9"],["1080x1920","1080p","9:16"]].map(row => <tr key={row[0]}>{row.map(cell => <td key={cell}>{cell}</td>)}</tr>)}</tbody></table></div>
-    <p>Image2Pro reference_images 支持公开 HTTPS URL、PNG/JPEG/WebP Data URL、或 {`{url, role}`}/本站 owner-scoped {`{asset_id, role}`}。URL必须无需登录、无重定向且不指向内网；每图最多5MB/2000万像素，请求体最多24MB，仍受用户素材配额与并发限制。其他协议继续使用 /v1/video-assets 上传后返回的 asset_id。role 仅 first_frame/last_frame；普通图和带角色图不可混用，不能只有尾帧。</p>
-    {code(`{"reference_images":[{"url":"https://YOUR_FILES/first.png","role":"first_frame"},{"url":"data:image/png;base64,REPLACE_WITH_REAL_BASE64","role":"last_frame"}]}\n# 续写：本人同模型已完成任务 video.media_id，不是任务ID\n{"duration":8,"resolution":"720p","reference_videos":["extend://REPLACE_WITH_MEDIA_ID"]}`)}
+    <p>视频参考图片先通过 /v1/video-assets 上传，使用本人素材的 asset_id；不接受外部图片 URL。Image2Pro 也可接收 PNG/JPEG/WebP Base64 Data URL，本站校验并存储后转发，单张最多5 MiB/2000万像素，请求体最多24 MiB。所有素材均受大小、配额与并发限制。role 仅 first_frame/last_frame；普通图和带角色图不可混用，不能只有尾帧。</p>
+    {code(`curl --fail "$BASE_URL/v1/video-assets" -H "Authorization: Bearer $API_KEY" -F 'kind=image' -F 'file=@reference.png'\n# 将上传结果 asset_id 填入视频创建请求；首尾帧须由模型支持\n{"reference_images":[{"asset_id":"REPLACE_WITH_UPLOADED_ASSET_ID","role":"first_frame"}]}\n# 续写：本人同模型已完成任务 video.media_id，不是任务ID\n{"duration":8,"resolution":"720p","reference_videos":["extend://REPLACE_WITH_MEDIA_ID"]}`)}
     <p>续写不能带图片，只接受本人同模型已完成且已结算任务的媒体ID或原成品直链，并固定原渠道；不会公开返回上游签名直链，推荐使用 media_id。成品自动下载到本站私有缓存；video.duration/resolution/size 为上游实际返回（可能缺省），measured_duration/measured_size 为文件检测值，不用申请值冒充实测。</p>
     <h2 id="billing">计费与错误处理</h2>
     <p>client_request_id 或 Idempotency-Key 为6–120位字母、数字、点、下划线或连字符；同时提供须一致。同用户同编号重放返回原任务，新任务参数冲突返回409；不同用户隔离。duration/seconds、size与对应分辨率/比例以及省略默认值在原能力快照下归一化。历史无指纹任务保留原重放行为。向上游使用稳定的本站任务编号，不重试未知创建。</p>

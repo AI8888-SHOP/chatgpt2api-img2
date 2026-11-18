@@ -57,6 +57,7 @@ from services.utils import extract_chat_prompt, extract_response_prompt, parse_i
 
 
 from services.image_service import ImageGenerationError
+from services.image_service import ImageSubmissionUnknownError
 from services.generated_image_cache_service import generated_image_cache_service
 from services.user_image_storage import GENERATED_IMAGES_DIR, ensure_generated_images_dir
 from services.version import get_app_version
@@ -65,6 +66,7 @@ from utils.helper import (
     has_response_image_generation_tool as protocol_has_response_image_generation_tool,
     is_image_chat_request as protocol_is_image_chat_request,
     parse_image_count as protocol_parse_image_count,
+    validate_inline_image_inputs,
 )
 
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -264,6 +266,8 @@ _REGISTER_EVENT_TOKENS_LOCK = Lock()
 _REGISTER_EVENT_TOKEN_TTL_SECONDS = 3600
 MAX_UPLOAD_IMAGE_BYTES = 25 * 1024 * 1024
 MAX_UPLOAD_IMAGE_TOTAL_BYTES = 60 * 1024 * 1024
+MAX_IMAGE_JSON_BODY_BYTES = 82 * 1024 * 1024
+MAX_IMAGE_MULTIPART_BODY_BYTES = 62 * 1024 * 1024
 ALLOWED_UPLOAD_IMAGE_TYPES = {"image/png", "image/jpeg", "image/webp", "image/gif"}
 
 
@@ -345,11 +349,15 @@ def _cleanup_image_jobs() -> None:
 
 
 def _public_image_job(job_id: str, job: dict[str, object]) -> dict[str, object]:
+    error = ""
+    if job.get("error"):
+        error = ("生成结果待核对；积分保留预扣，系统不会自动重试，请联系管理员"
+                 if job.get("status") == "unknown" else "图片生成失败，请稍后重试")
     return {
         "job_id": job_id,
         "status": job.get("status") or "pending",
         "result": job.get("result"),
-        "error": job.get("error") or "",
+        "error": error,
         "progress": job.get("progress") or "",
         "progress_text": job.get("progress_text") or "",
         "can_resume": job.get("can_resume") is True,
@@ -448,11 +456,12 @@ def _recover_unfinished_image_jobs() -> int:
         for job in _IMAGE_JOBS.values():
             if str(job.get("status") or "") not in {"pending", "running"}:
                 continue
-            job["status"] = "error"
-            job["error"] = "服务已重启，未完成的生成任务已中断"
+            job["status"] = "unknown"
+            job["submission_unknown"] = True
+            job["error"] = "服务已重启，生成结果待核对；未重新提交，积分保留预扣"
             job["can_resume"] = False
-            job["progress"] = "error"
-            job["progress_text"] = _image_progress_text("error")
+            job["progress"] = "unknown"
+            job["progress_text"] = "生成结果待核对"
             job["updated_at"] = now
             for field in _IMAGE_JOB_SECRET_FIELDS:
                 job.pop(field, None)
@@ -654,14 +663,18 @@ def require_user_quota(user, amount: int) -> None:
         raise HTTPException(status_code=402, detail={"error": "用户积分不足，请先兑换积分"})
 
 
-def reserve_user_quota(user, amount: int, *, action: str, model: str, unit_price: int | None = None) -> dict[str, object]:
+def reserve_user_quota(user, amount: int, *, action: str, model: str, unit_price: int | None = None, image_edit: bool = False) -> dict[str, object]:
     amount = max(1, int(amount or 1))
     price_key = {"image_generate": "image_generate_price", "image_edit": "image_edit_price", "image_resume_poll": "image_generate_price", "chat_image_completion": "image_generate_price", "responses_image_generation": "image_generate_price"}.get(action)
+    if image_edit and price_key:
+        price_key = "image_edit_price"
     unit_price = unit_price if unit_price is not None else (int(config.get().get(price_key, 1)) if price_key else 1)
     if price_key and action != "image_resume_poll":
         selected_model = config.get_default_image_model() if model == "auto" else model
-        entry = next((item for item in config.get_image_models() if item["id"].lower() == selected_model.lower()), {})
-        unit_price = int(entry.get("edit_price" if action == "image_edit" else "generate_price", unit_price))
+        entry = next((item for item in config.get_public_image_models() if item["id"].casefold() == str(selected_model or "").strip().casefold()), {})
+        if entry:
+            model = entry["id"]
+            unit_price = int(entry.get("edit_price" if action == "image_edit" or image_edit else "generate_price", unit_price))
     amount *= unit_price
     reservation = user_service.reserve_quota(
         user.id,
@@ -695,6 +708,13 @@ def refund_user_quota_reservation(reservation: dict[str, object], *, action: str
     )
 
 
+def hold_image_reservation(reservation: dict[str, object], *, job_id: str = "") -> None:
+    user_service.mark_quota_reservation_unknown(
+        str(reservation.get("id") or ""),
+        metadata={"reason": "upstream_submission_unknown", **({"job_id": job_id} if job_id else {})},
+    )
+
+
 def _is_iterator_result(value: object) -> bool:
     return hasattr(value, "__iter__") and not isinstance(value, (dict, list, str, bytes, bytearray))
 
@@ -714,7 +734,8 @@ def _settle_protocol_success(user, reservation: dict[str, object], *, action: st
 
 
 def _refund_protocol_failure(user, reservation: dict[str, object], *, action: str, prompt: str, model: str, started_at: float, error: object, upstream_name: str = "") -> None:
-    message = str(error or "")
+    is_image = action in {"chat_image_completion", "responses_image_generation"}
+    message = "图片生成失败，请稍后重试" if is_image else str(error or "")[:500]
     refund_user_quota_reservation(reservation, action=action, model=model, error=message)
     log_user_usage(
         user,
@@ -737,20 +758,34 @@ async def _call_openai_protocol(
     prompt: str,
     model: str,
     charge_amount: int,
+    image_edit: bool = False,
 ):
     started_at = datetime.now().timestamp()
     if prompt:
         await run_in_threadpool(check_request, prompt)
-    reservation = reserve_user_quota(user, charge_amount, action=action, model=model)
+    reservation = reserve_user_quota(user, charge_amount, action=action, model=model, image_edit=image_edit)
     usage_metadata = build_image_cache_metadata(user, action=action, model=model)
     try:
         result = await run_in_threadpool(handler, payload, usage_metadata=usage_metadata)
+    except ImageSubmissionUnknownError:
+        if action in {"chat_image_completion", "responses_image_generation"}:
+            hold_image_reservation(reservation)
+            log_user_usage(user, action=action, prompt=prompt, model=model, status="unknown", started_at=started_at, upstream_name=usage_metadata["upstream_name"], error="upstream_submission_unknown")
+            raise HTTPException(status_code=504, detail={"error": "图片生成结果待核对，系统不会自动重试"}) from None
+        raise
     except HTTPException as exc:
         _refund_protocol_failure(user, reservation, action=action, prompt=prompt, model=model, started_at=started_at, error=exc.detail, upstream_name=usage_metadata["upstream_name"])
+        if action in {"chat_image_completion", "responses_image_generation"}:
+            raise HTTPException(status_code=exc.status_code, detail={"error": "图片请求失败，请检查参数或稍后重试"}) from None
         raise
     except Exception as exc:
+        if action in {"chat_image_completion", "responses_image_generation"} and getattr(exc, "submission_unknown", False):
+            hold_image_reservation(reservation)
+            log_user_usage(user, action=action, prompt=prompt, model=model, status="unknown", started_at=started_at, upstream_name=usage_metadata["upstream_name"], error="upstream_submission_unknown")
+            raise HTTPException(status_code=504, detail={"error": "图片生成结果待核对，系统不会自动重试"}) from None
         _refund_protocol_failure(user, reservation, action=action, prompt=prompt, model=model, started_at=started_at, error=exc, upstream_name=usage_metadata["upstream_name"])
-        raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
+        message = "图片生成失败，请稍后重试" if action in {"chat_image_completion", "responses_image_generation"} else "请求失败，请稍后重试"
+        raise HTTPException(status_code=502, detail={"error": message}) from None
 
     if _is_iterator_result(result):
         def stream() -> Iterator[str]:
@@ -759,9 +794,26 @@ async def _call_openai_protocol(
                 for item in result:
                     yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
                 _settle_protocol_success(user, reservation, action=action, prompt=prompt, model=model, started_at=started_at, amount=charge_amount, upstream_name=usage_metadata["upstream_name"])
+            except ImageSubmissionUnknownError:
+                if action in {"chat_image_completion", "responses_image_generation"}:
+                    hold_image_reservation(reservation)
+                    log_user_usage(user, action=action, prompt=prompt, model=model, status="unknown", started_at=started_at, upstream_name=usage_metadata["upstream_name"], error="upstream_submission_unknown")
+                    payload = {"error": {"message": "图片生成结果待核对，系统不会自动重试", "type": "submission_unknown"}}
+                else:
+                    _refund_protocol_failure(user, reservation, action=action, prompt=prompt, model=model, started_at=started_at, error="request_failed", upstream_name=usage_metadata["upstream_name"])
+                    payload = {"error": {"message": "请求失败，请稍后重试", "type": "request_failed"}}
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
             except Exception as exc:
-                _refund_protocol_failure(user, reservation, action=action, prompt=prompt, model=model, started_at=started_at, error=exc, upstream_name=usage_metadata["upstream_name"])
-                payload = {"error": {"message": str(exc), "type": exc.__class__.__name__}}
+                if action in {"chat_image_completion", "responses_image_generation"} and getattr(exc, "submission_unknown", False):
+                    hold_image_reservation(reservation)
+                    log_user_usage(user, action=action, prompt=prompt, model=model, status="unknown", started_at=started_at, upstream_name=usage_metadata["upstream_name"], error="upstream_submission_unknown")
+                    payload = {"error": {"message": "图片生成结果待核对，系统不会自动重试", "type": "submission_unknown"}}
+                    yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                    yield "data: [DONE]\n\n"
+                    return
+                message = "图片生成失败，请稍后重试" if action in {"chat_image_completion", "responses_image_generation"} else "请求失败，请稍后重试"
+                _refund_protocol_failure(user, reservation, action=action, prompt=prompt, model=model, started_at=started_at, error=message, upstream_name=usage_metadata["upstream_name"])
+                payload = {"error": {"message": message, "type": "request_failed"}}
                 yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
             yield "data: [DONE]\n\n"
 
@@ -923,6 +975,42 @@ def create_app() -> FastAPI:
     router = APIRouter()
     prompt_optimizer = PromptOptimizerService(OptimizerLimits(DATA_DIR / "prompt_optimizer_limits.db"))
     video_upload_users = set()
+
+    @app.middleware("http")
+    async def bound_image_input(request: Request, call_next):
+        if request.method == "POST":
+            path = request.url.path
+            json_limits = {
+                "/v1/images/generations": 2 * 1024 * 1024,
+                "/v1/image-jobs/generations": 2 * 1024 * 1024,
+                "/v1/chat/completions": MAX_IMAGE_JSON_BODY_BYTES,
+                "/v1/responses": MAX_IMAGE_JSON_BODY_BYTES,
+            }
+            multipart_paths = {"/v1/images/edits", "/v1/image-jobs/edits"}
+            limit = json_limits.get(path)
+            content_type = str(request.headers.get("content-type") or "").lower()
+            if path in multipart_paths and content_type.startswith("multipart/form-data"):
+                limit = MAX_IMAGE_MULTIPART_BODY_BYTES
+            if limit is not None:
+                try:
+                    require_user(request.headers.get("authorization"))
+                except HTTPException as exc:
+                    return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+                length = str(request.headers.get("content-length") or "")
+                if length.isdigit() and int(length) > limit:
+                    return JSONResponse({"detail": "图片请求内容过大"}, status_code=413)
+                try:
+                    raw = bytearray()
+                    async with asyncio.timeout(60):
+                        async for chunk in request.stream():
+                            if len(raw) + len(chunk) > limit:
+                                return JSONResponse({"detail": "图片请求内容过大"}, status_code=413)
+                            raw.extend(chunk)
+                    request._body = bytes(raw)
+                    return await call_next(request)
+                except TimeoutError:
+                    return JSONResponse({"detail": "图片请求读取超时"}, status_code=408)
+        return await call_next(request)
 
     @app.middleware("http")
     async def bound_video_json(request: Request, call_next):
@@ -1786,7 +1874,28 @@ def create_app() -> FastAPI:
             )
             _update_image_job(job_id, status="success", result=result, error="", can_resume=False, progress="success", progress_text=_image_progress_text("success"))
         except ImageGenerationError as exc:
-            refund_user_quota_reservation(reservation, action="image_generate", model=body.model, error=str(exc))
+            if isinstance(exc, ImageSubmissionUnknownError):
+                hold_image_reservation(reservation, job_id=job_id)
+                conversation_id = str(getattr(exc, "conversation_id", "") or "")
+                access_token = str(getattr(exc, "access_token", "") or "")
+                device_id = str(getattr(exc, "device_id", "") or "")
+                _update_image_job(
+                    job_id,
+                    status="unknown",
+                    error="生成结果待核对，系统不会自动重试",
+                    can_resume=body.n == 1 and bool(conversation_id and access_token),
+                    submission_unknown=True,
+                    conversation_id=conversation_id,
+                    resume_access_token=access_token,
+                    resume_device_id=device_id,
+                    resume_prompt=body.prompt,
+                    resume_model=body.model,
+                    progress="unknown",
+                    progress_text="生成结果待核对",
+                )
+                log_user_usage(api_key, action="image_generate", prompt=body.prompt, model=body.model, status="unknown", started_at=start_time, upstream_name=usage_metadata["upstream_name"], error="upstream_submission_unknown")
+                return
+            refund_user_quota_reservation(reservation, action="image_generate", model=body.model, error="图片生成失败，请稍后重试")
             log_user_usage(
                 api_key,
                 action="image_generate",
@@ -1795,7 +1904,7 @@ def create_app() -> FastAPI:
                 status="failed",
                 started_at=start_time,
                 upstream_name=usage_metadata["upstream_name"],
-                error=str(exc),
+                error="图片生成失败，请稍后重试",
             )
             conversation_id = str(getattr(exc, "conversation_id", "") or "")
             access_token = str(getattr(exc, "access_token", "") or "")
@@ -1804,7 +1913,7 @@ def create_app() -> FastAPI:
             _update_image_job(
                 job_id,
                 status="error",
-                error=str(exc),
+                error="图片生成失败，请稍后重试",
                 can_resume=can_resume,
                 conversation_id=conversation_id,
                 resume_access_token=access_token,
@@ -1815,7 +1924,7 @@ def create_app() -> FastAPI:
                 progress_text=_image_progress_text("error"),
             )
         except Exception as exc:
-            refund_user_quota_reservation(reservation, action="image_generate", model=body.model, error=str(exc))
+            refund_user_quota_reservation(reservation, action="image_generate", model=body.model, error="图片生成失败，请稍后重试")
             log_user_usage(
                 api_key,
                 action="image_generate",
@@ -1824,9 +1933,9 @@ def create_app() -> FastAPI:
                 status="failed",
                 started_at=start_time,
                 upstream_name=usage_metadata["upstream_name"],
-                error=str(exc),
+                error="图片生成失败，请稍后重试",
             )
-            _update_image_job(job_id, status="error", error=str(exc), can_resume=False, progress="error", progress_text=_image_progress_text("error"))
+            _update_image_job(job_id, status="error", error="图片生成失败，请稍后重试", can_resume=False, progress="error", progress_text=_image_progress_text("error"))
 
     def run_edit_job(job_id: str, api_key, prompt: str, images: list[tuple[bytes, str, str]], model: str, n: int, size: str = "auto", output_format: str = "png") -> None:
         start_time = datetime.now().timestamp()
@@ -1868,7 +1977,28 @@ def create_app() -> FastAPI:
             )
             _update_image_job(job_id, status="success", result=result, error="", can_resume=False, progress="success", progress_text=_image_progress_text("success"))
         except ImageGenerationError as exc:
-            refund_user_quota_reservation(reservation, action="image_edit", model=model, error=str(exc))
+            if isinstance(exc, ImageSubmissionUnknownError):
+                hold_image_reservation(reservation, job_id=job_id)
+                conversation_id = str(getattr(exc, "conversation_id", "") or "")
+                access_token = str(getattr(exc, "access_token", "") or "")
+                device_id = str(getattr(exc, "device_id", "") or "")
+                _update_image_job(
+                    job_id,
+                    status="unknown",
+                    error="生成结果待核对，系统不会自动重试",
+                    can_resume=n == 1 and bool(conversation_id and access_token),
+                    submission_unknown=True,
+                    conversation_id=conversation_id,
+                    resume_access_token=access_token,
+                    resume_device_id=device_id,
+                    resume_prompt=prompt,
+                    resume_model=model,
+                    progress="unknown",
+                    progress_text="生成结果待核对",
+                )
+                log_user_usage(api_key, action="image_edit", prompt=prompt, model=model, status="unknown", started_at=start_time, upstream_name=usage_metadata["upstream_name"], reference_images=references, error="upstream_submission_unknown")
+                return
+            refund_user_quota_reservation(reservation, action="image_edit", model=model, error="图片编辑失败，请稍后重试")
             log_user_usage(
                 api_key,
                 action="image_edit",
@@ -1878,7 +2008,7 @@ def create_app() -> FastAPI:
                 started_at=start_time,
                 upstream_name=usage_metadata["upstream_name"],
                 reference_images=references,
-                error=str(exc),
+                error="图片编辑失败，请稍后重试",
             )
             conversation_id = str(getattr(exc, "conversation_id", "") or "")
             access_token = str(getattr(exc, "access_token", "") or "")
@@ -1887,7 +2017,7 @@ def create_app() -> FastAPI:
             _update_image_job(
                 job_id,
                 status="error",
-                error=str(exc),
+                error="图片编辑失败，请稍后重试",
                 can_resume=can_resume,
                 conversation_id=conversation_id,
                 resume_access_token=access_token,
@@ -1898,7 +2028,7 @@ def create_app() -> FastAPI:
                 progress_text=_image_progress_text("error"),
             )
         except Exception as exc:
-            refund_user_quota_reservation(reservation, action="image_edit", model=model, error=str(exc))
+            refund_user_quota_reservation(reservation, action="image_edit", model=model, error="图片编辑失败，请稍后重试")
             log_user_usage(
                 api_key,
                 action="image_edit",
@@ -1908,9 +2038,9 @@ def create_app() -> FastAPI:
                 started_at=start_time,
                 upstream_name=usage_metadata["upstream_name"],
                 reference_images=references,
-                error=str(exc),
+                error="图片编辑失败，请稍后重试",
             )
-            _update_image_job(job_id, status="error", error=str(exc), can_resume=False, progress="error", progress_text=_image_progress_text("error"))
+            _update_image_job(job_id, status="error", error="图片编辑失败，请稍后重试", can_resume=False, progress="error", progress_text=_image_progress_text("error"))
 
     def run_resume_image_job(job_id: str, api_key, extra_timeout_secs: int) -> None:
         job = _get_image_job(job_id) or {}
@@ -1926,7 +2056,10 @@ def create_app() -> FastAPI:
 
         _update_image_job(job_id, status="running", error="", can_resume=False, progress="polling_image_result", progress_text=_image_progress_text("polling_image_result"))
         try:
-            reservation = reserve_user_quota(api_key, 1, action="image_resume_poll", model=model, unit_price=int(job.get("unit_price") or 1))
+            if job.get("submission_unknown") is True:
+                reservation = {"id": job.get("reservation_id") or "", "amount": int(job.get("reserved_amount") or 0), "unit_price": int(job.get("unit_price") or 1)}
+            else:
+                reservation = reserve_user_quota(api_key, 1, action="image_resume_poll", model=model, unit_price=int(job.get("unit_price") or 1))
             result = chatgpt_service.resume_image_poll(
                 access_token,
                 device_id,
@@ -1960,11 +2093,16 @@ def create_app() -> FastAPI:
                 result=result,
                 error="",
                 can_resume=False,
+                submission_unknown=False,
                 progress="success",
                 progress_text=_image_progress_text("success"),
             )
         except Exception as exc:
-            refund_user_quota_reservation(reservation, action="image_resume_poll", model=model, error=str(exc))
+            if job.get("submission_unknown") is True:
+                _update_image_job(job_id, status="unknown", error="生成结果仍待核对；未重新提交", can_resume=bool(conversation_id and access_token), progress="unknown", progress_text="生成结果仍待核对")
+                log_user_usage(api_key, action="image_resume_poll", prompt=prompt, model=model, status="unknown", started_at=start_time, upstream_name=usage_metadata["upstream_name"], reference_images=references, error="poll_result_unknown")
+                return
+            refund_user_quota_reservation(reservation, action="image_resume_poll", model=model, error="图片结果查询失败")
             log_user_usage(
                 api_key,
                 action="image_resume_poll",
@@ -1974,13 +2112,13 @@ def create_app() -> FastAPI:
                 started_at=start_time,
                 upstream_name=usage_metadata["upstream_name"],
                 reference_images=references,
-                error=str(exc),
+                error="图片结果查询失败",
             )
             still_timeout = "超时" in str(exc)
             _update_image_job(
                 job_id,
                 status="error",
-                error=str(exc),
+                error="图片编辑失败，请稍后重试",
                 can_resume=still_timeout and bool(conversation_id and access_token),
                 progress="error",
                 progress_text=_image_progress_text("error"),
@@ -1988,10 +2126,13 @@ def create_app() -> FastAPI:
 
     def require_frontend_image_model(model: str) -> str:
         requested = str(model or "").strip()
-        if not requested or requested == "auto":
+        if not requested or requested.casefold() == "auto":
             requested = config.get_default_image_model()
-        if not requested or requested not in {item["id"] for item in config.get_public_image_models()}:
+        public_models = config.get_public_image_models()
+        entry = next((item for item in public_models if item["id"].casefold() == requested.casefold()), None)
+        if not entry:
             raise HTTPException(status_code=400, detail={"error": "该模型未开放或已停用，请刷新页面选择可用模型"})
+        requested = entry["id"]
         route_model = "grok-imagine-image" if requested.lower() == "grok-imagine-image-edit" else requested.lower()
         def upstream_models(item: dict[str, object]) -> set[str]:
             values = item.get("models") if isinstance(item.get("models"), list) else [item.get("model")]
@@ -2036,6 +2177,8 @@ def create_app() -> FastAPI:
         if n < 1 or n > 4:
             raise HTTPException(status_code=400, detail={"error": "n must be between 1 and 4"})
         uploads = [*(image or []), *(image_list or [])]
+        if len(uploads) > 10:
+            raise HTTPException(413, detail={"error": "最多上传 10 张图片"})
         if not uploads:
             raise HTTPException(status_code=400, detail={"error": "image file is required"})
 
@@ -2092,8 +2235,7 @@ def create_app() -> FastAPI:
     async def generate_images(body: ImageGenerationRequest, authorization: str | None = Header(default=None)):
         start_time = datetime.now().timestamp()
         token, api_key = require_user(authorization)
-        if token.startswith("usr_"):
-            body.model = require_frontend_image_model(body.model)
+        body.model = require_frontend_image_model(body.model)
         reservation = reserve_user_quota(api_key, body.n, action="image_generate", model=body.model)
         usage_metadata = build_image_cache_metadata(api_key, action="image_generate", model=body.model)
         try:
@@ -2126,8 +2268,14 @@ def create_app() -> FastAPI:
                 usage_amount=usage_amount,
             )
             return result
-        except ImageGenerationError as exc:
-            refund_user_quota_reservation(reservation, action="image_generate", model=body.model, error=str(exc))
+        except ImageSubmissionUnknownError:
+            hold_image_reservation(reservation)
+            message = "图片生成结果待核对，积分保留预扣；系统不会自动重试，请联系管理员"
+            log_user_usage(api_key, action="image_generate", prompt=body.prompt, model=body.model, status="unknown", started_at=start_time, upstream_name=usage_metadata["upstream_name"], error="upstream_submission_unknown")
+            raise HTTPException(status_code=504, detail={"error": message}) from None
+        except ImageGenerationError:
+            message = "图片生成失败，请稍后重试"
+            refund_user_quota_reservation(reservation, action="image_generate", model=body.model, error=message)
             log_user_usage(
                 api_key,
                 action="image_generate",
@@ -2136,11 +2284,11 @@ def create_app() -> FastAPI:
                 status="failed",
                 started_at=start_time,
                 upstream_name=usage_metadata["upstream_name"],
-                error=str(exc),
+                error=message,
             )
-            raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
+            raise HTTPException(status_code=502, detail={"error": message}) from None
         except Exception as exc:
-            refund_user_quota_reservation(reservation, action="image_generate", model=body.model, error=str(exc))
+            refund_user_quota_reservation(reservation, action="image_generate", model=body.model, error="图片生成失败，请稍后重试")
             log_user_usage(
                 api_key,
                 action="image_generate",
@@ -2149,9 +2297,9 @@ def create_app() -> FastAPI:
                 status="failed",
                 started_at=start_time,
                 upstream_name=usage_metadata["upstream_name"],
-                error=str(exc),
+                error="图片生成失败，请稍后重试",
             )
-            raise
+            raise HTTPException(status_code=502, detail={"error": "图片生成失败，请稍后重试"}) from None
 
     @router.post("/v1/images/edits")
     async def edit_images(
@@ -2166,11 +2314,12 @@ def create_app() -> FastAPI:
     ):
         start_time = datetime.now().timestamp()
         token, api_key = require_user(authorization)
-        if token.startswith("usr_"):
-            model = require_frontend_image_model(model)
+        model = require_frontend_image_model(model)
         if n < 1 or n > 4:
             raise HTTPException(status_code=400, detail={"error": "n must be between 1 and 4"})
         uploads = [*(image or []), *(image_list or [])]
+        if len(uploads) > 10:
+            raise HTTPException(413, detail={"error": "最多上传 10 张图片"})
         if not uploads:
             raise HTTPException(status_code=400, detail={"error": "image file is required"})
 
@@ -2216,8 +2365,14 @@ def create_app() -> FastAPI:
                 usage_amount=usage_amount,
             )
             return result
-        except ImageGenerationError as exc:
-            refund_user_quota_reservation(reservation, action="image_edit", model=model, error=str(exc))
+        except ImageSubmissionUnknownError:
+            hold_image_reservation(reservation)
+            message = "图片编辑结果待核对，积分保留预扣；系统不会自动重试，请联系管理员"
+            log_user_usage(api_key, action="image_edit", prompt=prompt, model=model, status="unknown", started_at=start_time, upstream_name=usage_metadata["upstream_name"], reference_images=references, error="upstream_submission_unknown")
+            raise HTTPException(status_code=504, detail={"error": message}) from None
+        except ImageGenerationError:
+            message = "图片编辑失败，请稍后重试"
+            refund_user_quota_reservation(reservation, action="image_edit", model=model, error=message)
             log_user_usage(
                 api_key,
                 action="image_edit",
@@ -2227,11 +2382,11 @@ def create_app() -> FastAPI:
                 started_at=start_time,
                 upstream_name=usage_metadata["upstream_name"],
                 reference_images=references,
-                error=str(exc),
+                error=message,
             )
-            raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
+            raise HTTPException(status_code=502, detail={"error": message}) from None
         except Exception as exc:
-            refund_user_quota_reservation(reservation, action="image_edit", model=model, error=str(exc))
+            refund_user_quota_reservation(reservation, action="image_edit", model=model, error="图片编辑失败，请稍后重试")
             log_user_usage(
                 api_key,
                 action="image_edit",
@@ -2241,9 +2396,9 @@ def create_app() -> FastAPI:
                 started_at=start_time,
                 upstream_name=usage_metadata["upstream_name"],
                 reference_images=references,
-                error=str(exc),
+                error="图片编辑失败，请稍后重试",
             )
-            raise
+            raise HTTPException(status_code=502, detail={"error": "图片编辑失败，请稍后重试"}) from None
 
     @router.post("/v1/chat/completions")
     async def create_chat_completion(body: ChatCompletionRequest, authorization: str | None = Header(default=None)):
@@ -2251,7 +2406,14 @@ def create_app() -> FastAPI:
         payload = body.model_dump(mode="python")
         prompt = extract_chat_prompt(payload)
         model = str(payload.get("model") or "auto").strip() or "auto"
-        is_image_request = protocol_is_image_chat_request(payload)
+        image_count = validate_inline_image_inputs(payload)
+        configured_image_models = {item["id"].casefold() for item in config.get_image_models()}
+        is_image_request = protocol_is_image_chat_request(payload) or model.casefold() in configured_image_models
+        if is_image_request:
+            model = require_frontend_image_model(model)
+            payload["model"] = model
+            if not payload.get("modalities"):
+                payload["modalities"] = ["image"]
         charge_amount = protocol_parse_image_count(payload.get("n")) if is_image_request else 1
         action = "chat_image_completion" if is_image_request else "chat_completion"
         return await _call_openai_protocol(
@@ -2262,6 +2424,7 @@ def create_app() -> FastAPI:
             prompt=prompt,
             model=model,
             charge_amount=charge_amount,
+            image_edit=is_image_request and image_count > 0,
         )
 
     @router.post("/v1/responses")
@@ -2271,6 +2434,10 @@ def create_app() -> FastAPI:
         prompt = extract_response_prompt(payload.get("input"))
         model = str(payload.get("model") or "auto").strip() or "auto"
         action = "responses_image_generation" if protocol_has_response_image_generation_tool(payload) else "responses"
+        image_count = validate_inline_image_inputs(payload.get("input"))
+        if action == "responses_image_generation":
+            model = require_frontend_image_model(model)
+            payload["model"] = model
         return await _call_openai_protocol(
             user=api_key,
             payload=payload,
@@ -2279,6 +2446,7 @@ def create_app() -> FastAPI:
             prompt=prompt,
             model=model,
             charge_amount=1,
+            image_edit=action == "responses_image_generation" and image_count > 0,
         )
 
     @router.get("/v1/editable-file-tasks")

@@ -89,6 +89,18 @@ class Image2ProTests(unittest.TestCase):
             with self.assertRaises(HTTPException):
                 self.service.prepare_payload(self.user, self.body(reference_images=images), model)
 
+    def test_remote_reference_images_rejected_before_storage_or_charge(self):
+        model = self.configure()
+        for url in ("https://public.example/image.png", "http://127.0.0.1/private"):
+            with patch.object(self.service.assets, "save") as save:
+                with self.assertRaises(HTTPException) as raised:
+                    self.service.prepare_payload(self.user, self.body(reference_images=[url]), model)
+                self.assertEqual(raised.exception.status_code, 400)
+                save.assert_not_called()
+        with self.assertRaises(HTTPException) as raised:
+            self.service.prepare_payload(self.user, self.body(reference_images=["data:image/png;base64," + "A" * (7 * 1024 * 1024)]), model)
+        self.assertEqual(raised.exception.status_code, 413)
+
     def test_idempotency_defaults_aliases_conflicts_and_legacy(self):
         self.configure()
         original = self.service.create(self.user, self.body(client_request_id="business-001"))

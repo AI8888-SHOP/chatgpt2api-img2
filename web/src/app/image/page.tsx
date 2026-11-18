@@ -138,7 +138,7 @@ async function hydrateConversationJobs(conversation: ImageConversation): Promise
         progress: job.progress,
         progressText: job.progress_text,
         canResume: job.can_resume === true,
-        ...(job.status === "error" ? { status: "error" as const, error: job.error || "生成图片失败" } : {}),
+        ...(["error", "unknown"].includes(job.status) ? { status: "error" as const, error: job.error || "生成结果待核对" } : {}),
         ...(job.status === "success" && job.result?.data?.[0]?.url
           ? { status: "success" as const, url: job.result.data[0].url, progress: "success", progressText: "生成完成", canResume: false }
           : {}),
@@ -204,13 +204,13 @@ async function waitForImageJob(
       const job = await fetchImageJob(jobId);
       await onUpdate?.(job);
       if (job.status === "success" && job.result) return job.result;
-      if (job.status === "error") {
+      if (job.status === "error" || job.status === "unknown") {
         const error = new Error(job.error || "生成图片失败");
         Object.assign(error, { job });
         throw error;
       }
     } catch (error) {
-      if ((error as Error & { job?: ImageJobStatus }).job?.status === "error") throw error;
+      if (["error", "unknown"].includes((error as Error & { job?: ImageJobStatus }).job?.status || "")) throw error;
     }
     await sleep(3000);
   }
@@ -595,7 +595,7 @@ function ImageWorkspace() {
               } catch (error) {
                 const jobStatus = (error as Error & { job?: ImageJobStatus }).job;
                 const message = error instanceof Error ? error.message : "生成图片失败";
-                const canKeepPolling = Boolean(image.jobId) && jobStatus?.status !== "error";
+                const canKeepPolling = Boolean(image.jobId) && !["error", "unknown"].includes(jobStatus?.status || "");
                 await updateConversation(conversationId, (current) => ({
                   ...(current ?? conversation),
                   images: (current?.images ?? conversation.images).map((item) =>
@@ -1013,7 +1013,7 @@ function ImageWorkspace() {
         } catch (error) {
           const jobStatus = (error as Error & { job?: ImageJobStatus }).job;
           const message = error instanceof Error ? error.message : `第 ${index + 1} 张生成失败`;
-          const canKeepPolling = Boolean(submittedJobId) && jobStatus?.status !== "error";
+          const canKeepPolling = Boolean(submittedJobId) && !["error", "unknown"].includes(jobStatus?.status || "");
           const failedImage: StoredImage = {
             id: imageId,
             status: canKeepPolling ? "loading" : "error",

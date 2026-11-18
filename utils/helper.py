@@ -1,7 +1,6 @@
 import base64
 import hashlib
 import json
-import mimetypes
 import queue
 import re
 import threading
@@ -9,11 +8,9 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, Iterator
-from urllib.parse import urlparse
 
 from curl_cffi import requests
 from fastapi import HTTPException
-from services.proxy_service import proxy_settings
 from utils.log import logger
 
 BASE_IMAGE_MODELS = {"gpt-image-2"}
@@ -32,8 +29,6 @@ SUPPORTED_JSON_IMAGE_MIME_TYPES = {"image/png", "image/jpeg", "image/jpg", "imag
 MAX_JSON_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_JSON_EDIT_IMAGES = 10
 DATA_URL_IMAGE_RE = re.compile(r"^data:(?P<mime>[-+./\w]+);base64,(?P<data>.*)$", re.DOTALL)
-REMOTE_IMAGE_TIMEOUT_SECONDS = 20
-
 
 def _image_extension(mime_type: str) -> str:
     image_type = mime_type.split("/", 1)[1].split(";", 1)[0].lower() if "/" in mime_type else "png"
@@ -57,6 +52,8 @@ def _decode_json_image_string(value: str, index: int, filename: str | None = Non
         resolved_mime = "image/jpeg"
     if resolved_mime not in SUPPORTED_JSON_IMAGE_MIME_TYPES:
         raise HTTPException(status_code=400, detail={"error": "unsupported image mime type"})
+    if len(encoded) > 4 * ((MAX_JSON_IMAGE_BYTES + 2) // 3):
+        raise HTTPException(status_code=413, detail={"error": "image file exceeds 10 MiB limit"})
     try:
         image_data = base64.b64decode(encoded, validate=True)
     except Exception as exc:
@@ -395,45 +392,44 @@ def _message_image_url(value: object) -> str:
 
 def _decode_message_image_url(value: object) -> tuple[bytes, str] | None:
     source = _message_image_url(value)
-    if source.startswith("data:"):
-        header, _, data = source.partition(",")
-        mime = header.split(";")[0].removeprefix("data:") or "image/png"
-        return base64.b64decode(data), mime
-    if not source.startswith(("http://", "https://")):
+    if not source:
         return None
-    parsed = urlparse(source)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        return None
-
-    try:
-        response = requests.get(
-            source,
-            headers={"Accept": "image/*,*/*;q=0.8", "User-Agent": "chatgpt2api vision fetcher"},
-            timeout=REMOTE_IMAGE_TIMEOUT_SECONDS,
-            allow_redirects=True,
-            **proxy_settings.build_session_kwargs(),
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail={"error": f"image_url fetch failed: {exc}"}) from exc
-    if not 200 <= response.status_code < 300:
-        raise HTTPException(status_code=400, detail={"error": f"image_url fetch failed: HTTP {response.status_code}"})
-    content_length = str(response.headers.get("content-length") or "").strip()
-    if content_length.isdigit() and int(content_length) > MAX_JSON_IMAGE_BYTES:
-        raise HTTPException(status_code=400, detail={"error": "image_url exceeds 10MB limit"})
-    image_data = response.content
-    if not image_data:
-        raise HTTPException(status_code=400, detail={"error": "image_url returned empty content"})
-    if len(image_data) > MAX_JSON_IMAGE_BYTES:
-        raise HTTPException(status_code=400, detail={"error": "image_url exceeds 10MB limit"})
-    mime = str(response.headers.get("content-type") or "image/png").split(";", 1)[0].lower()
-    guessed_mime = mimetypes.guess_type(parsed.path)[0] or ""
-    if mime and not mime.startswith("image/") and mime not in {"application/octet-stream", "binary/octet-stream"}:
-        raise HTTPException(status_code=400, detail={"error": "image_url must point to an image"})
-    if not mime.startswith("image/") and guessed_mime.startswith("image/"):
-        mime = guessed_mime
-    if not mime.startswith("image/"):
-        mime = "image/png"
+    if not source.startswith("data:"):
+        raise HTTPException(status_code=400, detail={"error": "不支持图片 URL，请直接上传图片文件或 Base64 图片数据"})
+    image_data, _, mime = _decode_json_image_string(source, 1)
     return image_data, mime
+
+
+def validate_inline_image_inputs(value: object) -> int:
+    """Validate every image part before billing, including earlier chat turns.
+
+    No network I/O. Bound aggregate decoded data and count across the request,
+    not just the last user message that a particular protocol consumes.
+    """
+    pending = [value]
+    count = total = 0
+    while pending:
+        item = pending.pop()
+        if isinstance(item, list):
+            pending.extend(item)
+        elif isinstance(item, dict):
+            if str(item.get("type") or "").strip() in {"image_url", "input_image", "image"}:
+                # Validate both aliases even if one would shadow the other.
+                for key in ("image_url", "url"):
+                    if item.get(key):
+                        source = _message_image_url(item[key])
+                        if not source.startswith("data:"):
+                            raise HTTPException(400, detail={"error": "不支持图片 URL，请直接上传图片文件或 Base64 图片数据"})
+                image = _decode_message_image_object(item)
+                if not image:
+                    raise HTTPException(400, detail={"error": "image data is required"})
+                count += 1
+                total += len(image[0])
+                if count > MAX_JSON_EDIT_IMAGES or total > 60 * 1024 * 1024:
+                    raise HTTPException(413, detail={"error": "最多 10 张图片，图片数据合计最多 60 MiB"})
+            else:
+                pending.extend(item.values())
+    return count
 
 
 def _decode_message_image_object(item: dict[str, object]) -> tuple[bytes, str] | None:

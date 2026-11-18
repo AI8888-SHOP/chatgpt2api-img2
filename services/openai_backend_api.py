@@ -1025,6 +1025,7 @@ class OpenAIBackendAPI:
             json=payload,
             timeout=self._bounded_image_timeout(300),
             stream=True,
+            allow_redirects=False,
         )
         ensure_ok(response, path)
         return response
@@ -2973,6 +2974,9 @@ class OpenAIBackendAPI:
         conduit_token = self._prepare_image_conversation(prompt, requirements, model)
         self._ensure_image_budget()
         self._report_progress("starting_generation")
+        # Set before the only billable POST. Later transport/download failures
+        # must not cause the account pool to submit a second generation.
+        self.image_submission_started = True
         response = self._start_image_generation(prompt, requirements, conduit_token, model, references)
         self._report_progress("generating")
         try:

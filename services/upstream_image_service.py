@@ -16,7 +16,7 @@ import requests
 from urllib.parse import urlsplit, urlunsplit
 
 from services.config import config
-from services.image_service import ImageGenerationError
+from services.image_service import ImageGenerationError, ImageSubmissionUnknownError
 from services.user_image_storage import save_generated_image
 from services.generated_image_cache_service import generated_image_cache_service
 
@@ -47,7 +47,7 @@ def _cooldown_upstream(upstream: dict[str, object], reason: str) -> None:
         return
     with _UPSTREAM_LOCK:
         _UPSTREAM_COOLDOWNS[_upstream_key(upstream)] = time.time() + seconds
-    print(f"[upstream-image] cooldown name={upstream.get('name')} seconds={seconds} reason={reason}")
+    print(f"[upstream-image] cooldown seconds={seconds} reason={reason}")
 
 
 def is_upstream_image_model(model: object) -> bool:
@@ -289,7 +289,6 @@ def generate_image_upstream(
     moderation: str = "auto",
     metadata: dict[str, str] | None = None,
     model: str = "",
-    _attempt: int = 0,
 ) -> dict:
     """调用上游 API 生成图片 POST /v1/images/generations"""
     prompt = str(prompt or "").strip()
@@ -331,10 +330,7 @@ def generate_image_upstream(
             body["moderation"] = moderation
 
     record_metadata.update(requested_size=size, sent_size=str(body.get("size", "")), requested_format=output_format)
-    print(
-        f"[upstream-image] generate upstream={upstream.get('name')} "
-        f"base={upstream.get('base_url')} prompt={prompt[:60]}... n={n} quality={quality} size={size}"
-    )
+    print(f"[upstream-image] generate model={upstream_model} n={n} quality={quality} size={size}")
 
     try:
         with _get_client(upstream) as client:
@@ -342,6 +338,7 @@ def generate_image_upstream(
                 _upstream_url(upstream, "/images/generations"),
                 json=body,
                 timeout=TIMEOUT,
+                allow_redirects=False,
             )
             resp.raise_for_status()
     except requests.HTTPError as exc:
@@ -352,26 +349,31 @@ def generate_image_upstream(
         except Exception:
             error_detail = exc.response.text[:200] if exc.response is not None else str(exc)
         status_code = exc.response.status_code if exc.response is not None else "unknown"
-        msg = f"upstream API error {status_code}: {error_detail}"
-        print(f"[upstream-image] fail {msg}")
-        if "insufficient_balance" in msg.lower() or "insufficient account balance" in msg.lower():
+        safe_detail = str(error_detail or "").lower()
+        print(f"[upstream-image] generate rejected status={status_code}")
+        if "insufficient_balance" in safe_detail or "insufficient account balance" in safe_detail:
             _cooldown_upstream(upstream, "insufficient_balance")
-        if _attempt < 2:
-            return generate_image_upstream(prompt, n, quality, size, output_format, output_compression, moderation, metadata, model, _attempt + 1)
-        raise ImageGenerationError(msg) from exc
+        if not isinstance(status_code, int) or status_code >= 500 or status_code == 408:
+            raise ImageSubmissionUnknownError("图片生成结果待核对，请稍后查看任务状态") from exc
+        raise ImageGenerationError("上游拒绝了图片生成请求，请检查参数后重试") from exc
     except requests.RequestException as exc:
-        msg = f"upstream API request failed: {exc}"
-        print(f"[upstream-image] fail {msg}")
-        if _attempt < 2:
-            return generate_image_upstream(prompt, n, quality, size, output_format, output_compression, moderation, metadata, model, _attempt + 1)
-        raise ImageGenerationError(msg) from exc
+        print(f"[upstream-image] generate transport outcome=unknown error_type={type(exc).__name__}")
+        raise ImageSubmissionUnknownError("图片生成结果待核对，请稍后查看任务状态") from exc
 
-    data = resp.json()
-    image_items = data.get("data") or []
-    stored_items = _process_upstream_images(image_items, prompt, record_metadata, upstream, output_format)
+    try:
+        data = resp.json()
+    except Exception as exc:
+        raise ImageSubmissionUnknownError("图片生成结果待核对，请稍后查看任务状态") from exc
+    try:
+        image_items = data.get("data") or []
+        if not isinstance(image_items, list):
+            raise ValueError("invalid images response")
+        stored_items = _process_upstream_images(image_items, prompt, record_metadata, upstream, output_format)
+    except Exception as exc:
+        raise ImageSubmissionUnknownError("图片结果未能验证或保存，请联系管理员核对") from exc
 
     if not stored_items:
-        raise ImageGenerationError("upstream API returned no images")
+        raise ImageSubmissionUnknownError("图片生成结果待核对，请稍后查看任务状态")
 
     return {
         "created": data.get("created", int(time.time())),
@@ -385,7 +387,6 @@ def edit_image_upstream(
     n: int = 1,
     metadata: dict[str, str] | None = None,
     model: str = "",
-    _attempt: int = 0,
     *,
     size: str = "auto",
     output_format: str = "png",
@@ -417,10 +418,7 @@ def edit_image_upstream(
     }
 
     record_metadata.update(requested_size=size, sent_size=str(fields.get("size", "")), requested_format=output_format)
-    print(
-        f"[upstream-image] edit upstream={upstream.get('name')} "
-        f"base={upstream.get('base_url')} prompt={prompt[:60]}... images={len(images)} n={n}"
-    )
+    print(f"[upstream-image] edit model={upstream_model} images={len(images)} n={n}")
 
     try:
         with _get_client(upstream, json_content_type=False) as client:
@@ -434,6 +432,7 @@ def edit_image_upstream(
                 data=fields,
                 files=files,
                 timeout=TIMEOUT,
+                allow_redirects=False,
             )
             resp.raise_for_status()
     except requests.HTTPError as exc:
@@ -444,26 +443,31 @@ def edit_image_upstream(
         except Exception:
             error_detail = exc.response.text[:200] if exc.response is not None else str(exc)
         status_code = exc.response.status_code if exc.response is not None else "unknown"
-        msg = f"upstream API error {status_code}: {error_detail}"
-        print(f"[upstream-image] edit fail {msg}")
-        if "insufficient_balance" in msg.lower() or "insufficient account balance" in msg.lower():
+        safe_detail = str(error_detail or "").lower()
+        print(f"[upstream-image] edit rejected status={status_code}")
+        if "insufficient_balance" in safe_detail or "insufficient account balance" in safe_detail:
             _cooldown_upstream(upstream, "insufficient_balance")
-        if _attempt < 2:
-            return edit_image_upstream(prompt, images, n, metadata, model, _attempt + 1, size=size, output_format=output_format)
-        raise ImageGenerationError(msg) from exc
+        if not isinstance(status_code, int) or status_code >= 500 or status_code == 408:
+            raise ImageSubmissionUnknownError("图片编辑结果待核对，请稍后查看任务状态") from exc
+        raise ImageGenerationError("上游拒绝了图片编辑请求，请检查参数后重试") from exc
     except requests.RequestException as exc:
-        msg = f"upstream API request failed: {exc}"
-        print(f"[upstream-image] edit fail {msg}")
-        if _attempt < 2:
-            return edit_image_upstream(prompt, images, n, metadata, model, _attempt + 1, size=size, output_format=output_format)
-        raise ImageGenerationError(msg) from exc
+        print(f"[upstream-image] edit transport outcome=unknown error_type={type(exc).__name__}")
+        raise ImageSubmissionUnknownError("图片编辑结果待核对，请稍后查看任务状态") from exc
 
-    data = resp.json()
-    image_items = data.get("data") or []
-    stored_items = _process_upstream_images(image_items, prompt, record_metadata, upstream, output_format)
+    try:
+        data = resp.json()
+    except Exception as exc:
+        raise ImageSubmissionUnknownError("图片编辑结果待核对，请稍后查看任务状态") from exc
+    try:
+        image_items = data.get("data") or []
+        if not isinstance(image_items, list):
+            raise ValueError("invalid images response")
+        stored_items = _process_upstream_images(image_items, prompt, record_metadata, upstream, output_format)
+    except Exception as exc:
+        raise ImageSubmissionUnknownError("图片结果未能验证或保存，请联系管理员核对") from exc
 
     if not stored_items:
-        raise ImageGenerationError("upstream API returned no images")
+        raise ImageSubmissionUnknownError("图片编辑结果待核对，请稍后查看任务状态")
 
     return {
         "created": data.get("created", int(time.time())),

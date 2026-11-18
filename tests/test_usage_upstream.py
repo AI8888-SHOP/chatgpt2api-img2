@@ -144,7 +144,8 @@ class UsageUpstreamTests(unittest.TestCase):
         self.http.post.side_effect = requests.HTTPError(response=response)
         result = self.client.post("/v1/images/generations", json={"prompt": "test", "model": "gpt-image-2", "size": "3840x2160"})
         self.assertEqual(result.status_code, 502)
-        self.assertIn("unsupported size 3840x2160", result.text)
+        self.assertNotIn("unsupported size 3840x2160", result.text)
+        self.http.post.assert_called_once()
         self.assertTrue(all(call.kwargs["json"]["size"] == "3840x2160" for call in self.http.post.call_args_list))
 
     def test_sync_generation_edit_persist_selected_upstream_and_admin_can_read(self):
@@ -163,18 +164,22 @@ class UsageUpstreamTests(unittest.TestCase):
         self.config.data["image_upstreams"][0]["name"] = "改名后"
         self.assertEqual(records[1]["upstream_name"], "线路甲")
 
-    def test_retries_record_last_selected_upstream_on_success_and_failure(self):
+    def test_uncertain_submission_does_not_retry_or_change_upstream(self):
         for kind in ("generations", "edits"):
             with self.subTest(kind=kind):
                 with patch.object(upstream, "_UPSTREAM_COUNTER", itertools.count()):
                     self.http.post.side_effect = [requests.Timeout("synthetic timeout"), self.response]
-                    self.assertEqual(self.send("/v1/images", kind).status_code, 200)
-                    self.assertEqual(self.usage.get_records()["records"][0]["upstream_name"], "线路乙")
+                    self.http.post.reset_mock()
+                    self.assertEqual(self.send("/v1/images", kind).status_code, 504)
+                    self.http.post.assert_called_once()
+                    self.assertEqual(self.usage.get_records()["records"][0]["upstream_name"], "线路甲")
                 with patch.object(upstream, "_UPSTREAM_COUNTER", itertools.count()):
                     self.http.post.side_effect = requests.Timeout("synthetic failure")
-                    self.assertEqual(self.send("/v1/images", kind).status_code, 502)
+                    self.http.post.reset_mock()
+                    self.assertEqual(self.send("/v1/images", kind).status_code, 504)
+                    self.http.post.assert_called_once()
                     record = self.usage.get_records()["records"][0]
-                    self.assertEqual((record["status"], record["upstream_name"]), ("failed", "线路甲"))
+                    self.assertEqual((record["status"], record["upstream_name"]), ("unknown", "线路甲"))
 
     def test_background_jobs_log_upstream_on_success_and_failure(self):
         class InlineThread:
@@ -189,7 +194,7 @@ class UsageUpstreamTests(unittest.TestCase):
                         self.assertEqual(self.send("/v1/image-jobs", kind).status_code, 200)
                         record = self.usage.get_records()["records"][0]
                         self.assertEqual(record["upstream_name"], "线路甲")
-                        self.assertEqual(record["status"], "failed" if failure else "success")
+                        self.assertEqual(record["status"], "unknown" if failure else "success")
                         if kind == "edits":
                             self.assertEqual(self.usage.reference_image_path(record["reference_images"][0]["id"]).read_bytes(), b"synthetic")
 
@@ -238,10 +243,10 @@ class UsageUpstreamTests(unittest.TestCase):
                         with self.subTest(endpoint=endpoint, stream=stream, failure=failure):
                             generate.side_effect = RuntimeError("synthetic failure") if failure else lambda *a: iter([result])
                             response = self.client.post("/v1/" + endpoint, json=self.protocol_body(endpoint, stream))
-                            self.assertEqual(response.status_code, 200 if stream or not failure else 502, response.text)
+                            self.assertEqual(response.status_code, 200 if stream or not failure else 504, response.text)
                             record = self.usage.get_records()["records"][0]
                             self.assertEqual(record["upstream_name"], "ChatGPT 账号池")
-                            self.assertEqual(record["status"], "failed" if failure else "success")
+                            self.assertEqual(record["status"], "unknown" if failure else "success")
                             self.assertNotIn("upstream_name", response.text)
                             self.assertNotIn("ChatGPT 账号池", response.text)
             accounts.get_available_access_token.side_effect = RuntimeError("no account available")

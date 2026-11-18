@@ -21,6 +21,10 @@ MAX_IMAGE_CONVERSATION_PROMPT_CHARS = 8000
 MAX_IMAGE_CONVERSATION_IMAGES = 12
 MAX_IMAGE_CONVERSATION_REFERENCE_IMAGES = 8
 QUOTA_RESERVATION_TTL_SECONDS = 15 * 60
+IMAGE_RESERVATION_ACTIONS = frozenset({
+    "image_generate", "image_edit", "image_resume_poll",
+    "chat_image_completion", "responses_image_generation",
+})
 
 
 def _now() -> int:
@@ -910,7 +914,7 @@ class UserService:
             return 0
         with self._lock, self._connect() as conn:
             row = conn.execute(
-                "SELECT * FROM user_quota_reservations WHERE id = ? AND status = 'pending'",
+                "SELECT * FROM user_quota_reservations WHERE id = ? AND status IN ('pending', 'unknown')",
                 (reservation_id,),
             ).fetchone()
             if not row:
@@ -956,7 +960,7 @@ class UserService:
             return True
         with self._lock, self._connect() as conn:
             row = conn.execute(
-                "SELECT * FROM user_quota_reservations WHERE id = ? AND status = 'pending'",
+                "SELECT * FROM user_quota_reservations WHERE id = ? AND status IN ('pending', 'unknown')",
                 (reservation_id,),
             ).fetchone()
             if not row:
@@ -987,11 +991,44 @@ class UserService:
             )
             return True
 
+    def mark_quota_reservation_unknown(
+        self,
+        reservation_id: str,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        reservation_id = str(reservation_id or "").strip()
+        if not reservation_id:
+            return False
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT metadata FROM user_quota_reservations WHERE id = ? AND status = 'pending'",
+                (reservation_id,),
+            ).fetchone()
+            if not row:
+                return False
+            try:
+                previous = json.loads(str(row["metadata"] or "{}"))
+            except json.JSONDecodeError:
+                previous = {}
+            if not isinstance(previous, dict):
+                previous = {}
+            previous.update(metadata or {})
+            previous["submission_unknown"] = True
+            conn.execute(
+                "UPDATE user_quota_reservations SET status = 'unknown', metadata = ?, updated_at = ? WHERE id = ? AND status = 'pending'",
+                (json.dumps(previous, ensure_ascii=False, separators=(",", ":")), _now(), reservation_id),
+            )
+            return True
+
     def refund_pending_quota_reservations(self, *, reason: str = "startup_refund") -> int:
         with self._lock, self._connect() as conn:
-            rows = conn.execute("SELECT id FROM user_quota_reservations WHERE status = 'pending' AND action != 'video_generate'").fetchall()
+            rows = conn.execute("SELECT id, action FROM user_quota_reservations WHERE status = 'pending' AND action != 'video_generate'").fetchall()
         refunded = 0
         for row in rows:
+            if row["action"] in IMAGE_RESERVATION_ACTIONS:
+                self.mark_quota_reservation_unknown(row["id"], metadata={"reason": "interrupted_image_request"})
+                continue
             if self.refund_quota_reservation(str(row["id"]), reason=reason, metadata={"reason": reason}):
                 refunded += 1
         return refunded
@@ -1005,11 +1042,14 @@ class UserService:
         cutoff = _now() - max(60, int(ttl_seconds or QUOTA_RESERVATION_TTL_SECONDS))
         with self._lock, self._connect() as conn:
             rows = conn.execute(
-                "SELECT id FROM user_quota_reservations WHERE status = 'pending' AND action != 'video_generate' AND updated_at < ?",
+                "SELECT id, action FROM user_quota_reservations WHERE status = 'pending' AND action != 'video_generate' AND updated_at < ?",
                 (cutoff,),
             ).fetchall()
         refunded = 0
         for row in rows:
+            if row["action"] in IMAGE_RESERVATION_ACTIONS:
+                self.mark_quota_reservation_unknown(row["id"], metadata={"reason": "image_result_pending"})
+                continue
             if self.refund_quota_reservation(str(row["id"]), reason=reason, metadata={"reason": reason, "cutoff": cutoff}):
                 refunded += 1
         return refunded
@@ -1017,6 +1057,13 @@ class UserService:
     def pending_video_reservations(self):
         with self._lock, self._connect() as conn:
             return [dict(row) for row in conn.execute("SELECT id, metadata FROM user_quota_reservations WHERE status='pending' AND action='video_generate'").fetchall()]
+
+    def unknown_quota_reservations(self, limit: int = 100):
+        with self._lock, self._connect() as conn:
+            return [dict(row) for row in conn.execute(
+                "SELECT id, user_id, amount, action, model, metadata, created_at, updated_at FROM user_quota_reservations WHERE status='unknown' ORDER BY updated_at LIMIT ?",
+                (max(1, min(500, int(limit or 100))),),
+            ).fetchall()]
 
     def consume_quota(
         self,
