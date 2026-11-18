@@ -20,7 +20,6 @@ export function imageSizeAllowed(model: string, value: string): boolean {
   return validImageSize(value) && (value === "auto" || !restrictedImageSizes(model) || restrictedImageSizes(model)!.includes(value));
 }
 export function imageSizeOptions(model: string) {
-  // No verified provider capability table exists for other models yet.
-  // Keep custom requests available, but do not advertise computed presets.
-  return restrictedImageSizes(model)?.map(value => ({ value, label: value.replace("x", "×") })) || [];
+  // Presets select request parameters, not verified provider capabilities.
+  return restrictedImageSizes(model)?.map(value => ({ value, label: value.replace("x", "×") })) || IMAGE_SIZE_PRESETS;
 }

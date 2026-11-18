@@ -60,19 +60,32 @@ function select(props) {
   const tree = selector.AspectRatioSelect(props);
   return { tree, select:elements(tree).find(item => item.type === 'Select'), items:elements(tree).filter(item => item.type === 'SelectItem') };
 }
-test('unverified presets are not advertised; custom dimensions retain exact Select values', () => {
+test('all 21 request presets are selectable and serialize exact dimensions', async () => {
   assert.equal(sizes.IMAGE_SIZE_PRESETS.length, 21);
   assert.equal(new Set(sizes.IMAGE_SIZE_PRESETS.map(item => item.value)).size, 21);
   for (const preset of sizes.IMAGE_SIZE_PRESETS) {
-    const view = select({value:preset.value, model:'gpt-image-2.6', onChange:() => {}});
+    let selected;
+    const view = select({value:preset.value, model:'gpt-image-2.6', onChange:value => selected=value});
     assert.equal(view.select.props.value, preset.value);
     assert.equal(view.items.filter(item => item.props.value === preset.value).length, 1);
-    assert.match(view.items.find(item => item.props.value === preset.value).props.children.join(''), /自定义/);
+    assert.equal(view.items.find(item => item.props.value === preset.value).props.children, preset.label);
+    view.select.props.onValueChange(preset.value);
+    assert.equal(selected, preset.value);
+    await api.createImageGenerationJob('test', 'gpt-image-2.6', {size:selected});
+    assert.equal(calls.at(-1)[1].body.size, preset.value);
+    await api.createImageEditJob([new Blob(['ref'], {type:'image/png'})], 'test', 'gpt-image-2.6', {size:selected});
+    assert.equal(calls.at(-1)[1].body.get('size'), preset.value);
   }
   for (const model of ['gpt-image-2.6', 'unknown', 'nano-banana-2.1']) {
-    assert.equal(sizes.imageSizeOptions(model).length, 0);
+    assert.equal(sizes.imageSizeOptions(model).length, 21);
     const view = select({value:'auto', model, onChange:() => {}});
-    assert.equal(view.items.length, 2); // auto + explicit custom request
+    assert.equal(view.items.length, 23); // presets + auto + custom
+  }
+  for (const model of ['grok-imagine-image', 'grok-imagine-image-edit']) {
+    const view = select({value:'auto', model, onChange:() => assert.fail('invalid size accepted')});
+    assert.equal(view.items.length, 6);
+    assert.equal(sizes.imageSizeAllowed(model, '4096x4096'), false);
+    view.select.props.onValueChange('4096x4096');
   }
 });
 test('actual selector sends exact dimensions; model switches clear restricted invalid values, never downscale', () => {

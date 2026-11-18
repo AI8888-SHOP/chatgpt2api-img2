@@ -35,7 +35,7 @@ export function AspectRatioSelect({ value, onChange, model }: { value: string; o
         {!restricted && <SelectItem value="__custom__">自定义像素尺寸…</SelectItem>}
       </SelectContent>
     </Select>
-    <p className="text-[10px] leading-4 text-muted-foreground">{restricted ? "按现有模型协议提供尺寸。" : "尺寸能力待上游确认；可自定义请求，不保证上游接受或成品像素。"}{!value && " 请重新选择尺寸。"}</p>
+    <p className="text-[10px] leading-4 text-muted-foreground">{restricted ? "按现有模型协议提供尺寸。" : "请求尺寸预设，实际上游是否支持以响应为准；不保证成品像素。"}{!value && " 请重新选择尺寸。"}</p>
     {!restricted && customOpen && <div className="flex flex-wrap gap-1">
       <Input aria-label="自定义图片尺寸" placeholder="例如 3840x2160" value={draft} onChange={event => setDraft(event.target.value)} className="h-8 w-[160px] text-xs" />
       <Button type="button" variant="outline" className="h-8 px-2 text-xs" disabled={!validImageSize(draft) || draft === "auto"} onClick={() => { onChange(draft); setCustomOpen(false); }}>应用尺寸</Button>
