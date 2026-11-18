@@ -739,7 +739,7 @@ function ImageWorkspace() {
     if (!src) return;
     try {
       const reference = await resultImageToReference(src, index);
-      stageVideoReference(dataUrlToFile(reference.dataUrl, reference.name, reference.type));
+      await stageVideoReference(dataUrlToFile(reference.dataUrl, reference.name, reference.type));
       router.push("/video");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "读取结果图失败，请重试");

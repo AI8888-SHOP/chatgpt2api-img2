@@ -89,7 +89,8 @@ export function VideoWorkspace() {
   useEffect(() => { void loadConfig(); }, [loadConfig]);
   useEffect(() => {
     if (!config) return;
-    const file = takeVideoReference();
+    void (async () => {
+    const file = await takeVideoReference();
     if (!file) return;
     const available = config.video_enabled ? (config.video_models || []).filter(item => item.max_reference_images > 0 && (item.supports_reference_images !== false || item.supports_frame_control)) : [];
     const target = available.find(item => item.id === config.default_video_model) || available[0];
@@ -100,6 +101,7 @@ export function VideoWorkspace() {
     setModelId(target.id);
     setMode("image");
     toast.success("图片已带入，请描述镜头与动作后再生成视频");
+    })().catch(() => toast.error("图片带入失败，请重新选择图片"));
   }, [config]);
   useEffect(() => {
     let stopped = false;

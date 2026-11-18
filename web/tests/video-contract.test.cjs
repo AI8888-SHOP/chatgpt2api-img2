@@ -6,16 +6,20 @@ const path=require('node:path');
 const read=file=>fs.readFileSync(path.join(__dirname,'../src',file),'utf8');
 test('image to video handoff is one-shot, expires and rejects unsupported files',async()=>{
   const {File}=require('node:buffer');
-  const {stageVideoReference,takeVideoReference}=await import('../src/lib/video-reference-draft.js');
+  const vm=require('node:vm');
+  const values=new Map(),tokens=new Map();
+  const context=vm.createContext({File,Date,crypto:require('node:crypto').webcrypto,setTimeout,clearTimeout,localforage:{createInstance:()=>({keys:async()=>[...values.keys()],getItem:async key=>values.get(key),setItem:async(key,value)=>values.set(key,value),removeItem:async key=>values.delete(key)})},sessionStorage:{getItem:key=>tokens.get(key),setItem:(key,value)=>tokens.set(key,value),removeItem:key=>tokens.delete(key)}});
+  vm.runInContext(read('lib/video-reference-draft.js').replace('import localforage from "localforage";', '').replaceAll('export async function','async function'),context);
+  const {stageVideoReference,takeVideoReference}=context;
   const file=new File(['image'],'reference.png',{type:'image/png'});
-  stageVideoReference(file);
-  assert.equal(takeVideoReference(),file);
-  assert.equal(takeVideoReference(),null);
-  assert.throws(()=>stageVideoReference(new File(['GIF'],'image.gif',{type:'image/gif'})),/PNG/);
-  assert.throws(()=>stageVideoReference(new File([new Uint8Array(5*1024*1024+1)],'large.png',{type:'image/png'})),/5 MB/);
-  stageVideoReference(file);
+  await stageVideoReference(file);
+  assert.equal(await (await takeVideoReference()).text(),'image');
+  assert.equal(await takeVideoReference(),null);
+  await assert.rejects(()=>stageVideoReference(new File(['GIF'],'image.gif',{type:'image/gif'})),/PNG/);
+  await assert.rejects(()=>stageVideoReference(new File([new Uint8Array(5*1024*1024+1)],'large.png',{type:'image/png'})),/5 MB/);
+  await stageVideoReference(file);
   const now=Date.now;
-  try { Date.now=()=>now()+61000; assert.equal(takeVideoReference(),null); } finally { Date.now=now; }
+  try { Date.now=()=>now()+61000; assert.equal(await takeVideoReference(),null); } finally { Date.now=now; }
   assert.doesNotMatch(read('app/image/page.tsx'),/aria-label="创作类型"|<VideoWorkspace/);
   assert.match(read('app/image/components/image-results.tsx'),/图生视频/);
 });
