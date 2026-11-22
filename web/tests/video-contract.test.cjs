@@ -4,6 +4,16 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const path=require('node:path');
 const read=file=>fs.readFileSync(path.join(__dirname,'../src',file),'utf8');
+test('video submission capacity allows twenty jobs and counts hidden or unknown tasks',async()=>{
+  const {videoCapacity}=await import('../src/lib/video-controls.js');
+  assert.equal(videoCapacity([{status:'pending'}],1,20).full,false);
+  const jobs=Array.from({length:19},()=>({status:'pending'}));
+  assert.equal(videoCapacity(jobs,19,20).full,false);
+  assert.equal(videoCapacity([...jobs,{status:'unknown'}],null,20).full,true);
+  assert.equal(videoCapacity([{status:'done'}],20,20).full,true);
+  assert.equal(videoCapacity([{status:'done'},{status:'failed'},{status:'expired'}],0,20).count,0);
+  assert.equal(videoCapacity(jobs,0,20).count,19);
+});
 test('image to video handoff is one-shot, expires and rejects unsupported files',async()=>{
   const {File}=require('node:buffer');
   const vm=require('node:vm');

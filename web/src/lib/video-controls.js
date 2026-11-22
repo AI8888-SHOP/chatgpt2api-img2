@@ -23,3 +23,10 @@ export function allowedDuration(model, current, maximum) {
 export function videoCredits(unitPrice, duration, billingMode) {
   return billingMode === "per_request" ? unitPrice : duration * unitPrice;
 }
+
+/** @param {{status: string}[]} jobs @param {number | null | undefined} activeCount @param {number} limit */
+export function videoCapacity(jobs, activeCount, limit = 20) {
+  const visible = jobs.filter(job => !["done", "failed", "expired"].includes(job.status)).length;
+  const count = Math.max(activeCount ?? 0, visible);
+  return { count, limit, full: count >= limit };
+}

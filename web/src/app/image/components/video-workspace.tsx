@@ -9,7 +9,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useDesign } from "@/components/design-provider";
 import { PersonalPrompts } from "@/components/personal-prompts";
 import { httpRequest } from "@/lib/request";
-import { referenceLimit, allowedDuration, videoCredits } from "@/lib/video-controls";
+import { referenceLimit, allowedDuration, videoCredits, videoCapacity } from "@/lib/video-controls";
 import { takeVideoReference } from "@/lib/video-reference-draft";
 import { createVideoJob, fetchPublicAppConfig, fetchUserKeyInfo, fetchVideoJobs, uploadVideoAsset, type PublicAppConfig, type VideoGenerationParams, type VideoJob } from "@/lib/api";
 
@@ -53,6 +53,8 @@ export function VideoWorkspace() {
   const [video, setVideo] = useState<Attachment | null>(null);
   const [audio, setAudio] = useState<Attachment | null>(null);
   const [jobs, setJobs] = useState<VideoJob[]>([]);
+  const [activeCount, setActiveCount] = useState<number | null>(null);
+  const [limits, setLimits] = useState({ user_concurrency: 20, requests_per_minute: 50 });
   const [selectedId, setSelectedId] = useState("");
   const [historyError, setHistoryError] = useState("");
   const [historyLoaded, setHistoryLoaded] = useState(false);
@@ -76,7 +78,7 @@ export function VideoWorkspace() {
   const unitPrice = model?.[`price_${resolution}` as "price_480p" | "price_720p" | "price_1080p"] ?? defaultPrice;
   const perRequest = model?.billing_mode === "per_request";
   const price = videoCredits(unitPrice, duration, model?.billing_mode);
-  const active = jobs.find(j => !terminal(j));
+  const capacity = videoCapacity(jobs, activeCount, limits.user_concurrency);
   const selected = jobs.find(j => j.request_id === selectedId) || jobs[0];
 
   const loadConfig = useCallback(async () => {
@@ -111,6 +113,8 @@ export function VideoWorkspace() {
         const next = await fetchVideoJobs();
         if (stopped) return;
         setJobs(next.items); setHistoryError(""); setHistoryLoaded(true);
+        setActiveCount(next.active_count ?? null);
+        if (next.limits) setLimits(next.limits);
         const info = await fetchUserKeyInfo();
         if (!stopped) setQuota(Number(info.remaining ?? 0));
       } catch (error) {
@@ -149,7 +153,7 @@ export function VideoWorkspace() {
   };
 
   const submit = async () => {
-    if (submitting.current || !model || !prompt.trim() || active) return;
+    if (submitting.current || !model || !prompt.trim() || capacity.full) return;
     if (mode === "image" && images.length !== 1) return toast.error("请添加一张首帧图片");
     if (editing && (image2pro ? !extendSource : !video)) return toast.error("请选择需要延长的原视频或上传素材");
     if (referenceMode && !video && !images.length && !audio && !voice.trim()) return toast.error("请添加参考图或音频");
@@ -179,6 +183,7 @@ export function VideoWorkspace() {
       }
       setStage("提交后台任务");
       const created = await createVideoJob(request.current);
+      if (!jobs.some(job => job.request_id === created.request_id)) setActiveCount(count => (count ?? capacity.count) + 1);
       setJobs(current => [created, ...current.filter(j => j.request_id !== created.request_id)]);
       setSelectedId(created.request_id); request.current = null;
       if (window.innerWidth <= 900) requestAnimationFrame(() => outputRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
@@ -238,8 +243,8 @@ export function VideoWorkspace() {
         </div>
         <div className="rounded-lg bg-muted/30 p-3 text-sm"><div className="flex justify-between"><span>预计积分（{unitPrice} {perRequest ? "积分/次" : `积分/秒 × ${duration} 秒`}）</span><strong>{price}</strong></div><p className="mt-1 text-xs text-muted-foreground">提交前预扣，明确失败自动退回。{perRequest ? "按所选清晰度每次任务固定计费，不乘以时长。" : "按所选清晰度及申请时长计费。"}</p></div>
         {submitError && <p role="alert" className="text-sm text-red-600 dark:text-red-400">{submitError}；重试相同提交会复用任务，不会重复创建。</p>}
-        {active && <p role="status" className="text-sm text-muted-foreground">{active.status === "unknown" ? "已有待核对任务，请联系管理员" : "已有视频正在生成，完成后可继续提交"}</p>}
-        <Button className="w-full" disabled={busy || Boolean(active) || !prompt.trim() || !historyLoaded || Boolean(historyError) || (quota !== null && quota < price)} onClick={() => void submit()}>{busy ? <><LoaderCircle size={16} className="animate-spin" />{stage}</> : quota !== null && quota < price ? "积分不足" : <><Film size={16} />{submitError ? "重试提交" : "生成视频"}</>}</Button>
+        <p role="status" className="text-sm text-muted-foreground">进行中的任务 {capacity.count}/{capacity.limit} · 每分钟最多提交 {limits.requests_per_minute} 次{capacity.full ? "；并发已满，请等待已有任务结束" : ""}</p>
+        <Button className="w-full" disabled={busy || capacity.full || !prompt.trim() || !historyLoaded || Boolean(historyError) || (quota !== null && quota < price)} onClick={() => void submit()}>{busy ? <><LoaderCircle size={16} className="animate-spin" />{stage}</> : quota !== null && quota < price ? "积分不足" : <><Film size={16} />{submitError ? "重试提交" : "生成视频"}</>}</Button>
       </fieldset>
     </div>
   </section>;

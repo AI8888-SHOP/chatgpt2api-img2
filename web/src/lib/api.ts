@@ -36,7 +36,7 @@ export type VideoGenerationParams = {
 };
 
 export const createVideoJob = (body: VideoGenerationParams) => httpRequest<VideoJob>("/v1/videos/generations", { method: "POST", body, authScope: "user", timeout: 60000 });
-export const fetchVideoJobs = () => httpRequest<{ items: VideoJob[] }>("/v1/video-jobs", { authScope: "user", timeout: 15000 });
+export const fetchVideoJobs = () => httpRequest<{ items: VideoJob[]; active_count?: number; limits?: { user_concurrency: number; requests_per_minute: number; global_concurrency: number } }>("/v1/video-jobs", { authScope: "user", timeout: 15000 });
 export const fetchVideoJob = (id: string) => httpRequest<VideoJob>(`/v1/videos/generations/${encodeURIComponent(id)}`, { authScope: "user", timeout: 15000 });
 export function uploadVideoAsset(file: File, kind: "image" | "audio" | "video") {
   const body = new FormData(); body.append("file", file); body.append("kind", kind);

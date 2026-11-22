@@ -29,7 +29,7 @@ export function VideoSettingsCard() {
         </div>
         <label className="flex items-center gap-2 text-sm">720p 每秒积分<Input aria-label="720p 每秒积分" type="number" min={1} max={10000} className="w-24" value={config?.video_720p_credits_per_second ?? (config?.video_credits_per_second ?? 1) * 2} onChange={e => setConfigValue("video_720p_credits_per_second", Math.max(1, Math.min(10000, Math.trunc(Number(e.target.value) || 1))))} /></label>
         <label className="flex items-center gap-2 text-sm">1080p 每秒积分<Input aria-label="1080p 每秒积分" type="number" min={1} max={10000} value={config?.video_1080p_credits_per_second ?? (config?.video_credits_per_second ?? 1) * 4} onChange={e => setConfigValue("video_1080p_credits_per_second", Math.max(1, Math.min(10000, Math.trunc(Number(e.target.value) || 1))))} /></label>
-        <p className="text-xs text-muted-foreground">按秒模型按申请时长乘以单价；按次模型每个任务收取一次对应清晰度单价。每用户每分钟一次、同时一个任务，全站最多八个。实际供应商费用与本站积分独立。</p>
+        <p className="text-xs text-muted-foreground">按秒模型按申请时长乘以单价；按次模型每个任务收取一次对应清晰度单价。每用户每分钟最多50次、同时最多20个任务，全站最多500个。实际供应商费用与本站积分独立。</p>
         <label className="block space-y-2 text-sm">素材公网地址（Seedance / 原生协议上传素材时必填）
           <Input aria-label="视频素材公网地址" placeholder="https://img.example.com" value={config?.video_public_base_url || ""} onChange={e => setConfigValue("video_public_base_url", e.target.value)} />
           <span className="block text-xs text-muted-foreground">填写本站可被上游访问的 HTTPS 地址，必须能访问 /video-assets/。素材以随机链接供上游读取，48 小时后过期。</span>

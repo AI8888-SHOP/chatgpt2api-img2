@@ -20,6 +20,10 @@ from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, model_validator, field_validator
 from services.video_assets import VideoAssets
 
+VIDEO_USER_CONCURRENCY = 20
+VIDEO_USER_RPM = 50
+VIDEO_GLOBAL_CONCURRENCY = 500
+
 
 class VideoImage(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -151,6 +155,8 @@ class VideoService:
                 db.execute("ALTER TABLE video_jobs ADD COLUMN diagnostics TEXT NOT NULL DEFAULT '[]'")
             db.execute("CREATE TABLE IF NOT EXISTS video_reconciliations (id INTEGER PRIMARY KEY, job_id TEXT NOT NULL, created REAL NOT NULL, remote_id TEXT, confirmed_failed INTEGER NOT NULL, note TEXT NOT NULL)")
             db.execute("CREATE UNIQUE INDEX IF NOT EXISTS video_client_requests ON video_jobs(owner,client_request_id)")
+            db.execute("CREATE INDEX IF NOT EXISTS video_owner_created ON video_jobs(owner,created)")
+            db.execute("CREATE INDEX IF NOT EXISTS video_active_owners ON video_jobs(owner) WHERE state NOT IN ('done','failed','expired')")
         self.assets = VideoAssets(self)
 
     @contextmanager
@@ -278,6 +284,16 @@ class VideoService:
                 payload["reference_audios"] = voices
         return payload
 
+    def check_submission_limits(self, db, owner):
+        active = db.execute("SELECT COUNT(*) AS total, COALESCE(SUM(owner=?),0) AS owned FROM video_jobs WHERE state NOT IN ('done','failed','expired')", (owner,)).fetchone()
+        if active["owned"] >= VIDEO_USER_CONCURRENCY:
+            raise HTTPException(429, f"每位用户最多同时进行 {VIDEO_USER_CONCURRENCY} 个视频任务，请等待已有任务结束")
+        if active["total"] >= VIDEO_GLOBAL_CONCURRENCY:
+            raise HTTPException(429, f"全站视频任务已达 {VIDEO_GLOBAL_CONCURRENCY} 个并发上限，请稍后提交")
+        recent = db.execute("SELECT COUNT(*) FROM video_jobs WHERE owner=? AND created>?", (owner, time.time()-60)).fetchone()[0]
+        if recent >= VIDEO_USER_RPM:
+            raise HTTPException(429, f"每位用户每分钟最多提交 {VIDEO_USER_RPM} 个视频任务")
+
     def create(self, user, body):
         original_request = body.model_copy(deep=True)
         def request_fingerprint(capabilities):
@@ -312,8 +328,7 @@ class VideoService:
         if self.users.get_user(user.id).quota < 1:
             raise HTTPException(402, "用户积分不足")
         with self.connect() as db:
-            if db.execute("SELECT 1 FROM video_jobs WHERE owner=? AND (created>? OR state NOT IN ('done','failed','expired'))", (user.id, time.time()-60)).fetchone():
-                raise HTTPException(429, "已有任务或每分钟提交次数已达上限")
+            self.check_submission_limits(db, user.id)
         body = body.model_copy(deep=True)
         upstream_payload = self.prepare_payload(user, body, model)
         source_channel = upstream_payload.pop("_source_channel", None)
@@ -334,12 +349,9 @@ class VideoService:
                 previous = db.execute("SELECT id,payload FROM video_jobs WHERE owner=? AND client_request_id=?", (user.id, body.client_request_id)).fetchone()
                 if previous:
                     return replay(previous)
-            active = db.execute("SELECT owner FROM video_jobs WHERE state NOT IN ('done','failed','expired')").fetchall()
-            if len(active) >= 8 or any(row["owner"] == user.id for row in active):
-                raise HTTPException(429, "视频任务并发已达上限，请等待已有任务结束")
-            recent = db.execute("SELECT 1 FROM video_jobs WHERE owner=? AND created>?", (user.id, time.time()-60)).fetchone()
-            if recent:
-                raise HTTPException(429, "每位用户每分钟最多提交一个视频任务")
+            # Recheck under the reservation lock: simultaneous requests must
+            # never pass the same last available concurrency/rate-limit slot.
+            self.check_submission_limits(db, user.id)
             job_id = "vid_" + uuid.uuid4().hex
             channel = channels[int(time.time_ns()) % len(channels)]
             # Persist before reserving so crash recovery can identify incomplete setup.
@@ -379,7 +391,9 @@ class VideoService:
     def list(self, owner, limit=50):
         with self.connect() as db:
             rows = db.execute("SELECT id FROM video_jobs WHERE owner=? ORDER BY created DESC LIMIT ?", (owner, max(1, min(100, limit)))).fetchall()
-        return {"items": [self.get(owner, row["id"]) for row in rows]}
+            active_count = db.execute("SELECT COUNT(*) FROM video_jobs WHERE owner=? AND state NOT IN ('done','failed','expired')", (owner,)).fetchone()[0]
+        return {"items": [self.get(owner, row["id"]) for row in rows], "active_count": active_count,
+                "limits": {"user_concurrency": VIDEO_USER_CONCURRENCY, "requests_per_minute": VIDEO_USER_RPM, "global_concurrency": VIDEO_GLOBAL_CONCURRENCY}}
 
     def update(self, job_id, **values):
         with self.connect() as db:
@@ -491,6 +505,12 @@ class VideoService:
                     response = session.get(endpoint(channel, "/" + quote(row["remote_id"], safe=""), protocol, payload.get("grok_endpoint", "generations")), headers=headers, timeout=(10, 30), allow_redirects=False)
                 self.record_diagnostic(row["id"], "create" if creating else "poll", response, secret=str(channel["api_key"]))
                 if response.status_code >= 400:
+                    if creating and response.status_code == 502:
+                        # Operator policy: absorb uncertain upstream acceptance
+                        # on creation 502s and refund via the idempotent ledger.
+                        # Poll/download failures must still retain accepted jobs.
+                        self.update(row["id"], state="failed", error="视频提交异常（HTTP 502），积分将自动退回；不会自动重试")
+                        return
                     if protocol in {"native", "image2pro"} and not creating and response.status_code in {401, 403, 404, 410}:
                         self.update(row["id"], state="unknown", error=f"原任务查询需要管理员核对（HTTP {response.status_code}），不会重新生成")
                         return

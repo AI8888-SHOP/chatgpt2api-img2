@@ -167,8 +167,8 @@ class Image2ProTests(unittest.TestCase):
         with self.assertRaises(HTTPException):
             self.service.content_path("someone-else", job)
 
-    def test_image2pro_definite_rejection_refunds_unknown_does_not_repost(self):
-        for status in (402, 413, 415, 408, 502):
+    def test_image2pro_rejection_and_creation_502_refund_unknown_does_not_repost(self):
+        for status in (402, 413, 415, 502, 408, 500, 503, 504):
             with self.subTest(status=status):
                 self.setUp()
                 self.configure()
@@ -176,8 +176,10 @@ class Image2ProTests(unittest.TestCase):
                 self.tick(job, {}, status=status)
                 session = self.tick(job)
                 session.post.assert_not_called()
-                self.assertEqual(self.row(job)["state"], "failed" if status in (402,413,415) else "unknown")
-                self.assertEqual(self.users.get_user(self.user.id).quota, 100 if status in (402,413,415) else 84)
+                self.assertEqual(self.row(job)["state"], "failed" if status in (402,413,415,502) else "unknown")
+                self.assertEqual(self.users.get_user(self.user.id).quota, 100 if status in (402,413,415,502) else 84)
+                self.tick(job).post.assert_not_called()
+                self.assertEqual(self.users.get_user(self.user.id).quota, 100 if status in (402,413,415,502) else 84)
 
     def test_safe_media_blocks_private_dns_redirects_and_never_sends_auth(self):
         with patch("services.video_safe_http.socket.getaddrinfo", return_value=[(None,None,None,None,("127.0.0.1",443))]):

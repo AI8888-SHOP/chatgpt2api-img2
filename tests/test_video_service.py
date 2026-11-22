@@ -433,9 +433,58 @@ class VideoTests(unittest.TestCase):
         self.assertEqual(self.users.get_user(self.user.id).quota, 100)
         self.assertTrue(self.row(job_id)["accounted"])
 
-    def test_502_stays_unknown_and_evidence_reconcile_is_idempotent(self):
+    def test_creation_502_refunds_once_after_restart_without_reposting(self):
+        for protocol in ("grok", "native", "seedance"):
+            for json_body in (True, False):
+                with self.subTest(protocol=protocol, json_body=json_body):
+                    self.setUp()
+                    self.config.update({**self.config.get(), "video_models": [{"id": "grok-imagine-video", "protocol": protocol}]})
+                    job_id = self.create()
+                    response = Mock(status_code=502, headers={"X-Upstream-Ops-Request-Id": "gateway-502"})
+                    if json_body:
+                        response.json.return_value = {"error": {"type": "upstream_error", "message": "private-key https://provider.example/private"}}
+                    else:
+                        response.json.side_effect = ValueError("HTML gateway error")
+                    with patch("services.video_service.requests.Session") as factory:
+                        session = factory.return_value.__enter__.return_value
+                        session.post.return_value = response
+                        self.service.tick(self.row(job_id))
+                        session.post.assert_called_once()
+                        session.get.assert_not_called()
+                    self.assertEqual(self.row(job_id)["state"], "failed")
+                    self.assertIsNone(self.row(job_id)["remote_id"])
+                    self.assertNotIn("upstream_payload", json.loads(self.row(job_id)["payload"]))
+                    self.assertIn("502", self.service.get(self.user.id, job_id)["error"])
+                    self.assertEqual(self.row(job_id)["diagnostic_id"], "gateway-502")
+                    self.assertEqual(json.loads(self.row(job_id)["diagnostics"])[0]["http_status"], 502)
+
+                    # Crash after refund but before marking the job accounted.
+                    with patch.object(self.service, "log_usage", side_effect=RuntimeError("synthetic crash")), patch("services.video_service.requests.Session") as network:
+                        with self.assertRaises(RuntimeError):
+                            self.service.tick(self.row(job_id))
+                        network.assert_not_called()
+                    self.assertFalse(self.row(job_id)["accounted"])
+                    self.assertEqual(self.users.get_user(self.user.id).quota, 100)
+                    self.service = VideoService(self.config, self.users, self.service.path, self.log)
+                    with patch("services.video_service.Thread"), patch("services.video_service.requests.Session") as network:
+                        self.service.start()
+                        for _ in range(3):
+                            self.service.tick(self.row(job_id))
+                        network.assert_not_called()
+                    self.assertTrue(self.row(job_id)["accounted"])
+                    self.assertEqual(self.users.get_user(self.user.id).quota, 100)
+                    self.assertEqual(self.log.call_args.kwargs["usage_amount"], 0)
+                    with self.users._connect() as db:
+                        reservation = db.execute("SELECT status FROM user_quota_reservations WHERE id=?", (self.row(job_id)["reservation"],)).fetchone()
+                        refunds = db.execute("SELECT amount,metadata FROM user_quota_ledger WHERE reason='video_failed'").fetchall()
+                    self.assertEqual(reservation["status"], "refunded")
+                    self.assertEqual(len(refunds), 1)
+                    self.assertEqual(refunds[0]["amount"], self.row(job_id)["amount"])
+                    self.assertEqual(json.loads(refunds[0]["metadata"])["video_job_id"], job_id)
+
+    def test_other_5xx_stays_unknown_and_evidence_reconcile_is_idempotent(self):
         job_id = self.create()
-        self.tick(job_id, {"error": {"type": "upstream_error", "message": "all routes failed"}}, status=502)
+        self.tick(job_id, {"error": {"type": "upstream_error", "message": "all routes failed"}}, status=503)
         self.assertEqual(self.row(job_id)["state"], "unknown")
         self.tick(job_id).post.assert_not_called()
         self.assertEqual(self.users.get_user(self.user.id).quota, 95)
@@ -509,6 +558,10 @@ class VideoTests(unittest.TestCase):
             self.service.tick(self.row(job_id))
             session.assert_not_called()
         self.assertEqual(self.row(job_id)["state"], "pending")
+        self.assertEqual(self.row(job_id)["remote_id"], "remote")
+        self.assertEqual(self.users.get_user(self.user.id).quota, 95)
+        with self.users._connect() as db:
+            self.assertEqual(db.execute("SELECT status FROM user_quota_reservations WHERE id=?", (self.row(job_id)["reservation"],)).fetchone()["status"], "pending")
 
     def test_grok_gateway_alias_retains_protocol_and_path_snapshot(self):
         self.config.update({**self.config.get(), "video_models": [{"id": "grok-imagine-video", "protocol": "grok", "grok_endpoint": "videos"}]})
@@ -532,11 +585,8 @@ class VideoTests(unittest.TestCase):
         self.assertTrue(url.startswith("https://public.example/video-assets/"))
         self.assertNotIn("base64", url)
 
-    def test_disabled_changed_channel_and_concurrency(self):
+    def test_disabled_and_changed_channel(self):
         job_id = self.create()
-        with self.assertRaises(HTTPException) as exc:
-            self.create()
-        self.assertEqual(exc.exception.status_code, 429)
         self.config.data["video_upstreams"][0]["api_key"] = "rotated-key"
         session = self.tick(job_id)
         session.post.assert_not_called()
