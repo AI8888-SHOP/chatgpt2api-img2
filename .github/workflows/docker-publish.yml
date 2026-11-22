@@ -24,6 +24,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+      - name: Install frontend test dependencies
+        run: npm install --prefix web --ignore-scripts --no-audit --no-fund --package-lock=false
       - name: Verify frontend contracts
         run: node --test web/tests/*.test.cjs
       - name: Install native document runtime
